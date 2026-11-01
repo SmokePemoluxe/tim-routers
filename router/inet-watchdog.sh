@@ -34,7 +34,7 @@
 # Отчёт:       inet-watchdog report > /tmp/report.txt
 # Настройки:   /etc/inet-watchdog.conf  (после правки: inet-watchdog restart)
 
-VERSION="3.2"
+VERSION="3.3"
 NAME="inet-watchdog"
 BIN="/usr/bin/$NAME"
 INIT="/etc/init.d/$NAME"
@@ -89,8 +89,9 @@ log_history() {
 	log "$*"
 	mkdir -p "$STATE_DIR"
 	echo "$(date '+%Y-%m-%d %H:%M:%S') [uptime $(uptime_s)s] $*" >> "$HISTORY_FILE"
-	if [ "$(wc -l < "$HISTORY_FILE")" -gt 400 ]; then
-		tail -n 250 "$HISTORY_FILE" > "$HISTORY_FILE.tmp" && mv "$HISTORY_FILE.tmp" "$HISTORY_FILE"
+	# Журнал во флеше держим небольшим: событий с подробностями — примерно на пару недель
+	if [ "$(wc -l < "$HISTORY_FILE")" -gt 200 ]; then
+		tail -n 120 "$HISTORY_FILE" > "$HISTORY_FILE.tmp" && mv "$HISTORY_FILE.tmp" "$HISTORY_FILE"
 	fi
 }
 
@@ -199,7 +200,13 @@ collect() {
 
 # Состояние для страницы LuCI: $1 — фаза (boot_wait|ok|problem), $2 — проблема, $3 — сколько длится.
 state_json() {
-	echo "{\"version\":\"$VERSION\",\"time\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"uptime\":$(uptime_s),\"phase\":\"$1\",\"problem\":\"$2\",\"problem_for\":${3:-0},\"ping\":{$ping_json},\"dns\":{$dns_json},\"web\":\"$web\",\"mem_percent\":$mem,\"mem_mb\":$(mem_avail_mb),\"load\":\"$(cut -d' ' -f1-3 /proc/loadavg)\",\"podkop\":\"$(podkop_state)\",\"reboots_row\":$(get_reboots)}"
+	echo "{\"version\":\"$VERSION\",\"agent\":\"$AGENT_VERSION\",\"podkop_version\":\"$PODKOP_VERSION\",\"time\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"uptime\":$(uptime_s),\"phase\":\"$1\",\"problem\":\"$2\",\"problem_for\":${3:-0},\"ping\":{$ping_json},\"dns\":{$dns_json},\"web\":\"$web\",\"mem_percent\":$mem,\"mem_mb\":$(mem_avail_mb),\"load\":\"$(cut -d' ' -f1-3 /proc/loadavg)\",\"podkop\":\"$(podkop_state)\",\"reboots_row\":$(get_reboots)}"
+}
+
+# Версии агента и podkop — для страницы в LuCI (считаем один раз при запуске)
+versions_init() {
+	AGENT_VERSION=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' /usr/bin/tim-agent 2>/dev/null | head -n 1)
+	PODKOP_VERSION=$(podkop show_version 2>/dev/null | head -n 1 | tr -d '"\\')
 }
 
 write_state() {
@@ -372,6 +379,7 @@ log_boot() {
 
 run() {
 	load_conf
+	versions_init
 	log_boot
 	log "запущен v$VERSION; ожидание после старта ${BOOT_DELAY}с"
 
@@ -764,6 +772,8 @@ function eventKind(text) {
 
 function renderStatus(running, st) {
 	var rows = [ row('Служба сторожа', running ? badge('работает', 'ok') : badge('НЕ ЗАПУЩЕНА', 'bad')) ];
+	if (st && st.version)
+		rows.push(row('Версии', 'сторож ' + st.version + (st.agent ? ' · агент ' + st.agent : '') + (st.podkop_version ? ' · podkop ' + st.podkop_version : '')));
 
 	if (!st) {
 		rows.push(row('Состояние', 'нет данных — служба ещё не сделала ни одной проверки'));
@@ -843,11 +853,13 @@ function renderBoots(events) {
 	]);
 }
 
-function renderHistory(events) {
+var HISTORY_SHORT = 30;
+
+function renderHistory(events, all) {
 	if (!events.length)
 		return E('p', {}, [ 'История пуста.' ]);
 
-	return table([ 'Время', 'Uptime', 'Событие' ], events.slice().reverse().slice(0, 200).map(function(ev) {
+	return table([ 'Время', 'Uptime', 'Событие' ], events.slice().reverse().slice(0, all ? events.length : HISTORY_SHORT).map(function(ev) {
 		var c = [ E('span', { style: 'font-weight:bold;color:' + COLORS[eventKind(ev.text)] }, [ ev.text ]) ];
 		if (ev.diag.length)
 			c.push(E('details', {}, [
@@ -891,13 +903,19 @@ return view.extend({
 			lastHistory = null,
 			confText = data[3];
 
-		var showHistory = function(text) {
-			if (text === lastHistory)
+		var historyAll = false;
+		var showHistory = function(text, force) {
+			if (text === lastHistory && !force)
 				return;
 			lastHistory = text;
 			var ev = parseHistory(text);
 			dom.content(bootsBox, renderBoots(ev));
-			dom.content(histBox, renderHistory(ev));
+			var more = ev.length > HISTORY_SHORT ? E('button', {
+				'class': 'btn cbi-button',
+				style: 'margin-top:8px',
+				click: function() { historyAll = !historyAll; showHistory(lastHistory, true); }
+			}, [ historyAll ? 'Показать последние ' + HISTORY_SHORT : 'Показать все (' + ev.length + ')' ]) : '';
+			dom.content(histBox, [ renderHistory(ev, historyAll), more ]);
 		};
 		showHistory(data[2]);
 
@@ -1002,7 +1020,7 @@ return view.extend({
 		};
 
 		return E('div', { 'class': 'cbi-map' }, [
-			E('h2', {}, [ 'Сторож интернета' ]),
+			E('h2', {}, [ 'Сторож интернета v__WD_VERSION__' ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
 				'Следит за интернетом, DNS (podkop), памятью и веб-интерфейсом. При сбое перезапускает WAN, podkop или uhttpd, а если не помогает — перезагружает роутер. ',
 				'Если что-то непонятно — нажмите «Скачать отчёт» и отправьте файл.'
@@ -1031,6 +1049,7 @@ return view.extend({
 	handleReset: null
 });
 LUCI_JS_EOF
+	sed -i "s/__WD_VERSION__/$VERSION/" "$LUCI_VIEW"
 
 	rm -f /tmp/luci-indexcache* 2>/dev/null
 	rm -rf /tmp/luci-modulecache 2>/dev/null
@@ -1062,6 +1081,11 @@ do_install() {
 		echo "Создан файл настроек: $CONF"
 	fi
 	write_luci
+
+	# Старые версии держали журнал до 400 строк — укорачиваем сразу
+	if [ -f "$HISTORY_FILE" ] && [ "$(wc -l < "$HISTORY_FILE")" -gt 200 ]; then
+		tail -n 120 "$HISTORY_FILE" > "$HISTORY_FILE.tmp" && mv "$HISTORY_FILE.tmp" "$HISTORY_FILE"
+	fi
 
 	# Чтобы сторож пережил обновление прошивки с сохранением настроек
 	for f in "$BIN" "$INIT" "$CONF" "$STATE_DIR/" "$LUCI_VIEW" "$LUCI_MENU" "$LUCI_ACL"; do
@@ -1126,6 +1150,7 @@ do_test() {
 
 do_json() {
 	load_conf
+	versions_init
 	collect
 	rm -rf "$check_dir"
 	if [ "$ping_ok" != "1" ]; then

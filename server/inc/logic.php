@@ -187,13 +187,35 @@ function find_same_router(array $info, int $exceptId = 0): ?array
 	return null;
 }
 
+// Последняя версия podkop на GitHub (обновляется из cron не чаще раза в 12 часов)
+function podkop_latest(bool $refresh = false): string
+{
+	$c = kv_get('podkop_latest', ['v' => '', 'ts' => 0]);
+	if ($refresh && time() - (int)$c['ts'] > 12 * 3600) {
+		$ch = curl_init('https://api.github.com/repos/itdoginfo/podkop/releases/latest');
+		curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_USERAGENT => 'tim-routers']);
+		$j = json_decode((string)curl_exec($ch), true);
+		$c = ['v' => (string)($j['tag_name'] ?? $c['v']), 'ts' => time()];
+		kv_set('podkop_latest', $c);
+	}
+	return (string)$c['v'];
+}
+
+function podkop_outdated(string $v): bool
+{
+	$latest = podkop_latest();
+	return $v !== '' && $latest !== '' && version_compare(ltrim($v, 'v'), ltrim($latest, 'v'), '<');
+}
+
 function router_hw_line(array $info): string
 {
+	$podkop = (string)($info['podkop'] ?? '');
 	$parts = array_filter([
 		$info['model'] ?? '',
 		!empty($info['openwrt']) ? 'OpenWrt ' . $info['openwrt'] : '',
-		!empty($info['podkop']) ? 'podkop ' . $info['podkop'] : '',
+		$podkop !== '' ? 'podkop ' . $podkop . (podkop_outdated($podkop) ? ' (есть ' . podkop_latest() . ')' : '') : '',
 		!empty($info['agent']) ? 'агент ' . $info['agent'] : '',
+		!empty($info['watchdog']['version']) ? 'сторож ' . $info['watchdog']['version'] : '',
 	]);
 	return h(implode(' · ', $parts));
 }
@@ -505,6 +527,7 @@ function api_upload(array $r, int $taskId, string $body): array
 function check_alerts(): void
 {
 	$now = time();
+	podkop_latest(true);
 	// Ключи из неудачных смен — не дольше суток
 	foreach (rows("SELECT id, payload FROM tasks WHERE status = 'failed' AND done_at < ? AND (payload LIKE '%\"key\":\"%' OR payload LIKE '%\"outbound\":\"%')", [$now - 86400]) as $t) {
 		$clean = json_encode(scrub_keys(json_decode($t['payload'], true) ?: []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);

@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="1.4"
+VERSION="1.5"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 
@@ -194,7 +194,8 @@ sections_json() {
 
 watchdog_json() {
 	if [ -x /usr/bin/inet-watchdog ]; then
-		printf '{"installed":true,"reboots_row":%s,"history":%s}' \
+		printf '{"installed":true,"version":%s,"reboots_row":%s,"history":%s}' \
+			"$(json_str "$(sed -n 's/^VERSION="\(.*\)"$/\1/p' /usr/bin/inet-watchdog | head -n 1)")" \
 			"$(json_num "$(cat /etc/inet-watchdog/reboots 2>/dev/null)")" \
 			"$(grep -v '^ ' /etc/inet-watchdog/history.log 2>/dev/null | tail -n 8 | json_list)"
 	else

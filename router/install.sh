@@ -5,13 +5,15 @@
 #
 # АДРЕС-СЕРВЕРА выдаёт панель («Как подключить роутер»). Без него установщик спросит адрес сам.
 # Флаги:
-#   --no-podkop   не ставить podkop, даже если его нет
-#   --ref ВЕРСИЯ  ветка или тег на GitHub (по умолчанию main)
+#   --no-podkop      не ставить podkop, даже если его нет
+#   --update-podkop  обновить уже установленный podkop официальным установщиком
+#   --ref ВЕРСИЯ     ветка или тег на GitHub (по умолчанию main)
 
 REPO="SmokePemoluxe/tim-routers"
 REF="main"
 SERVER=""
 WITH_PODKOP=1
+UPDATE_PODKOP=0
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
@@ -20,6 +22,7 @@ die() { printf '\n\033[31mОшибка: %s\033[0m\n' "$*"; exit 1; }
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--no-podkop) WITH_PODKOP=0 ;;
+		--update-podkop) UPDATE_PODKOP=1 ;;
 		--ref) shift; REF=$1 ;;
 		http://*|https://*) SERVER=${1%/} ;;
 		*) die "непонятный параметр: $1" ;;
@@ -71,15 +74,26 @@ echo "OK"
 
 # --- 2. podkop ---
 say "2/4 podkop"
-podkop_fresh=0
-if [ -x /etc/init.d/podkop ]; then
-	echo "уже установлен: $(podkop show_version 2>/dev/null | head -n 1)"
-elif [ "$WITH_PODKOP" = "1" ]; then
-	echo "podkop не найден — ставлю официальным установщиком (он может задать пару вопросов)"
+run_podkop_installer() {
 	wget -q -O /tmp/podkop-install.sh "$PODKOP_INSTALLER" || die "не удалось скачать установщик podkop с GitHub"
 	sh /tmp/podkop-install.sh
 	rm -f /tmp/podkop-install.sh
 	[ -x /etc/init.d/podkop ] || die "podkop не установился"
+}
+
+podkop_fresh=0
+if [ -x /etc/init.d/podkop ]; then
+	old_ver=$(podkop show_version 2>/dev/null | head -n 1)
+	if [ "$UPDATE_PODKOP" = "1" ]; then
+		echo "сейчас: $old_ver — обновляю официальным установщиком (он может задать пару вопросов; настройки сохраняются)"
+		run_podkop_installer
+		echo "теперь: $(podkop show_version 2>/dev/null | head -n 1)"
+	else
+		echo "уже установлен: $old_ver (обновить: добавьте в конец команды --update-podkop)"
+	fi
+elif [ "$WITH_PODKOP" = "1" ]; then
+	echo "podkop не найден — ставлю официальным установщиком (он может задать пару вопросов)"
+	run_podkop_installer
 	podkop_fresh=1
 else
 	echo "пропускаю (--no-podkop)"
