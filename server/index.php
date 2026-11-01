@@ -107,55 +107,65 @@ if (!empty($_SESSION['flash'])) {
 	unset($_SESSION['flash']);
 }
 
-$pending = rows("SELECT * FROM routers WHERE status = 'pending' ORDER BY id");
-$routers = rows("SELECT * FROM routers WHERE status = 'active' ORDER BY name COLLATE NOCASE");
-$alerts = rows('SELECT * FROM outbox ORDER BY id DESC LIMIT 15');
-$tasks = rows('SELECT t.*, r.name AS rname FROM tasks t LEFT JOIN routers r ON r.id = t.router_id ORDER BY t.id DESC LIMIT 15');
-$events = rows('SELECT e.*, r.name AS rname FROM events e LEFT JOIN routers r ON r.id = e.router_id ORDER BY e.id DESC LIMIT 50');
 
-$cnt = ['🟢' => 0, '🔴' => 0, '⚫' => 0];
-foreach ($routers as $r) {
-	$i = router_icon($r);
-	$cnt[$i] = ($cnt[$i] ?? 0) + 1;
+// ---------- Блоки страницы ----------
+// Каждый блок рендерится отдельно: при первой загрузке — в странице, потом — по запросу ?partial=1,
+// и скрипт на странице заменяет только изменившиеся блоки (без перезагрузки и «дёрганья»).
+
+function capture(callable $fn): string
+{
+	ob_start();
+	$fn();
+	return (string)ob_get_clean();
 }
 
-// Автообновление мешало бы вводить имя нового роутера
-panel_header('Обзор', !$pending);
-?>
-	<?php if ($notice): ?><div class="notice"><?= h($notice) ?></div><?php endif; ?>
+function block_pending(array $pending): string
+{
+	return capture(function () use ($pending) {
+		if (!$pending) {
+			return;
+		}
+		?>
+		<div class="card" style="border:2px solid #f5cd47">
+			<h2>🆕 Ждут подтверждения (<?= count($pending) ?>)</h2>
+			<?php foreach ($pending as $r): $info = rinfo($r); ?>
+				<div class="item">
+					<b><?= h($r['name']) ?></b> <span class="muted">#<?= (int)$r['id'] ?> · <?= ago($r['created_at']) ?></span><br>
+					<span class="muted"><?= router_hw_line($info) ?><br><?= router_mac_line($info) ?> · IP <?= h($r['ip']) ?></span>
+					<?php if ($same = find_same_router($info, (int)$r['id'])): ?>
+						<div class="notice" style="margin:6px 0 0">⚠️ Это железо уже было в системе: <b><?= h($same['name']) ?></b> (#<?= (int)$same['id'] ?>). Похоже, агент переустановили.</div>
+					<?php endif; ?>
+					<form method="post" class="row" style="margin-top:8px">
+						<?= csrf_field() ?>
+						<input type="hidden" name="rid" value="<?= (int)$r['id'] ?>">
+						<input type="text" name="name" placeholder="Имя, например «Офис Ленина»" value="" style="flex:1;min-width:160px">
+						<button name="action" value="accept" class="primary">✅ Принять</button>
+						<button name="action" value="reject" class="danger" onclick="return confirm('Отклонить этот роутер?')">Отклонить</button>
+					</form>
+				</div>
+			<?php endforeach; ?>
+		</div>
+		<?php
+	});
+}
 
-	<?php if ($pending): ?>
-	<div class="card" style="border:2px solid #f5cd47">
-		<h2>🆕 Ждут подтверждения (<?= count($pending) ?>)</h2>
-		<?php foreach ($pending as $r): $info = rinfo($r); ?>
-			<div class="item">
-				<b><?= h($r['name']) ?></b> <span class="muted">#<?= (int)$r['id'] ?> · <?= ago($r['created_at']) ?></span><br>
-				<span class="muted"><?= router_hw_line($info) ?><br><?= router_mac_line($info) ?> · IP <?= h($r['ip']) ?></span>
-				<?php if ($same = find_same_router($info, (int)$r['id'])): ?>
-					<div class="notice" style="margin:6px 0 0">⚠️ Это железо уже было в системе: <b><?= h($same['name']) ?></b> (#<?= (int)$same['id'] ?>). Похоже, агент переустановили.</div>
-				<?php endif; ?>
-				<form method="post" class="row" style="margin-top:8px">
-					<?= csrf_field() ?>
-					<input type="hidden" name="rid" value="<?= (int)$r['id'] ?>">
-					<input type="text" name="name" placeholder="Имя, например «Офис Ленина»" value="" style="flex:1;min-width:160px">
-					<button name="action" value="accept" class="primary">✅ Принять</button>
-					<button name="action" value="reject" class="danger" onclick="return confirm('Отклонить этот роутер?')">Отклонить</button>
-				</form>
-			</div>
-		<?php endforeach; ?>
-	</div>
-	<?php endif; ?>
-
-	<div class="card">
-		<h2>Роутеры <span class="muted">🟢 всё работает: <?= $cnt['🟢'] ?> · 🔴 на связи, но есть проблема: <?= $cnt['🔴'] ?> · ⚫ не на связи: <?= $cnt['⚫'] ?></span></h2>
-		<?php if (!$routers): ?>
-			<p class="muted">Пока пусто. Как подключить роутер — внизу страницы.</p>
-		<?php endif; ?>
-		<?php foreach ($routers as $r):
-			$sections = router_sections((int)$r['id']);
-			$byName = by_name($sections); ?>
-			<a class="item router-link" href="router.php?id=<?= (int)$r['id'] ?>">
-				<?php
+function block_routers(array $routers): string
+{
+	return capture(function () use ($routers) {
+		$cnt = ['🟢' => 0, '🔴' => 0, '⚫' => 0];
+		foreach ($routers as $r) {
+			$i = router_icon($r);
+			$cnt[$i] = ($cnt[$i] ?? 0) + 1;
+		}
+		?>
+		<div class="card">
+			<h2>Роутеры <span class="muted">🟢 всё работает: <?= $cnt['🟢'] ?> · 🔴 на связи, но есть проблема: <?= $cnt['🔴'] ?> · ⚫ не на связи: <?= $cnt['⚫'] ?></span></h2>
+			<?php if (!$routers): ?>
+				<p class="muted">Пока пусто. Как подключить роутер — внизу страницы.</p>
+			<?php endif; ?>
+			<?php foreach ($routers as $r):
+				$sections = router_sections((int)$r['id']);
+				$byName = by_name($sections);
 				$failed = array_map(fn($s) => $s['name'], array_filter($sections, 'section_failed'));
 				if (!is_online($r)) {
 					$status = '<span style="color:#626f86;font-weight:600">⚫ не на связи · последний раз ' . ago($r['last_seen']) . '</span>';
@@ -168,63 +178,131 @@ panel_header('Обзор', !$pending);
 					$status .= ' <span class="muted">· запрос ' . ago($r['last_seen']) . '</span>';
 				}
 				?>
-				<div class="row" style="justify-content:space-between">
-					<b style="font-size:15px"><?= router_icon($r) ?> <?= h($r['name']) ?></b>
-					<span><?= $status ?></span>
-				</div>
-				<div class="muted"><?= router_hw_line(rinfo($r)) ?></div>
-				<div style="margin-top:4px">
-					<?php foreach ($sections as $s): ?><div><?= tg_html(section_line($s, $byName)) ?></div><?php endforeach; ?>
-				</div>
-			</a>
-		<?php endforeach; ?>
-	</div>
+				<a class="item router-link" href="router.php?id=<?= (int)$r['id'] ?>">
+					<div class="row" style="justify-content:space-between">
+						<b style="font-size:15px"><?= router_icon($r) ?> <?= h($r['name']) ?></b>
+						<span><?= $status ?></span>
+					</div>
+					<div class="muted"><?= router_hw_line(rinfo($r)) ?></div>
+					<div style="margin-top:4px">
+						<?php foreach ($sections as $s): ?><div><?= tg_html(section_line($s, $byName)) ?></div><?php endforeach; ?>
+					</div>
+				</a>
+			<?php endforeach; ?>
+		</div>
+		<?php
+	});
+}
 
-	<?php
-	$outdated = 0;
-	foreach ($routers as $r) {
-		if (podkop_outdated((string)(rinfo($r)['podkop'] ?? ''))) {
-			$outdated++;
+function block_updates(array $routers): string
+{
+	return capture(function () use ($routers) {
+		if (!$routers) {
+			return;
 		}
-	}
-	?>
-	<?php if ($routers): ?>
-	<div class="card">
-		<h2>⬆️ Обновления на всех роутерах</h2>
-		<form method="post" class="row" onsubmit="return confirm('Обновить скрипты (сторож и агент) на всех роутерах?')">
-			<?= csrf_field() ?>
-			<input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег">
-			<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
-		</form>
-		<form method="post" class="row" style="margin-top:8px" onsubmit="return confirm('Обновить podkop на роутерах, где он устарел? Откатить обновление podkop нельзя — лучше сначала проверить на одном роутере.')">
-			<?= csrf_field() ?>
-			<button name="action" value="podkop_all" <?= $outdated ? '' : 'disabled' ?>>📦 Обновить podkop на всех</button>
-			<span class="muted"><?= podkop_latest() ? 'последний podkop: ' . h(podkop_latest()) . ' · ' : '' ?>устарел на роутерах: <?= $outdated ?></span>
-		</form>
-		<p class="muted" style="margin-bottom:0">После выпуска новой версии скриптов подождите ~5 минут: GitHub не сразу отдаёт свежие файлы.</p>
-	</div>
-	<?php endif; ?>
+		$outdated = 0;
+		foreach ($routers as $r) {
+			if (podkop_outdated((string)(rinfo($r)['podkop'] ?? ''))) {
+				$outdated++;
+			}
+		}
+		?>
+		<div class="card">
+			<h2>⬆️ Обновления на всех роутерах</h2>
+			<form method="post" class="row" onsubmit="return confirm('Обновить скрипты (сторож и агент) на всех роутерах?')">
+				<?= csrf_field() ?>
+				<input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег">
+				<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
+			</form>
+			<form method="post" class="row" style="margin-top:8px" onsubmit="return confirm('Обновить podkop на роутерах, где он устарел? Откатить обновление podkop нельзя — лучше сначала проверить на одном роутере.')">
+				<?= csrf_field() ?>
+				<button name="action" value="podkop_all" <?= $outdated ? '' : 'disabled' ?>>📦 Обновить podkop на всех</button>
+				<span class="muted"><?= podkop_latest() ? 'последний podkop: ' . h(podkop_latest()) . ' · ' : '' ?>устарел на роутерах: <?= $outdated ?></span>
+			</form>
+			<p class="muted" style="margin-bottom:0">После выпуска новой версии скриптов подождите ~5 минут: GitHub не сразу отдаёт свежие файлы.</p>
+		</div>
+		<?php
+	});
+}
 
-	<div class="card">
-		<h2>🔔 Уведомления</h2>
-		<?php if (!$alerts): ?><p class="muted">Пока тихо.</p><?php endif; ?>
-		<?php foreach ($alerts as $m): ?>
-			<div class="msg"><span class="muted"><?= fmt_time($m['ts']) ?></span><br><?= tg_html($m['text']) ?></div>
-		<?php endforeach; ?>
-	</div>
+function block_alerts(): string
+{
+	return capture(function () {
+		$alerts = rows('SELECT * FROM outbox ORDER BY id DESC LIMIT 15');
+		?>
+		<div class="card">
+			<h2>🔔 Уведомления</h2>
+			<?php if (!$alerts): ?><p class="muted">Пока тихо.</p><?php endif; ?>
+			<?php foreach ($alerts as $m): ?>
+				<div class="msg"><span class="muted"><?= fmt_time($m['ts']) ?></span><br><?= tg_html($m['text']) ?></div>
+			<?php endforeach; ?>
+		</div>
+		<?php
+	});
+}
 
-	<div class="card">
-		<h2>Задачи для роутеров</h2>
-		<?php if (!$tasks): ?><p class="muted">Задач ещё не было.</p><?php endif; ?>
-		<?php foreach ($tasks as $t):
-			$st = ['queued' => '⏳ в очереди', 'sent' => '📨 у роутера', 'done' => '✅ готово', 'failed' => '❌ ошибка'][$t['status']] ?? $t['status']; ?>
-			<div class="item">
-				<span class="muted"><?= fmt_time($t['created_at']) ?> · <?= h($t['rname']) ?></span> &nbsp; <?= $st ?><br>
-				<?= h(task_label($t['type'], json_decode($t['payload'], true) ?: [])) ?>
-				<?php if ($t['result']): ?><div class="muted"><?= h($t['result']) ?></div><?php endif; ?>
-			</div>
-		<?php endforeach; ?>
-	</div>
+function block_tasks(): string
+{
+	return capture(function () {
+		$tasks = rows('SELECT t.*, r.name AS rname FROM tasks t LEFT JOIN routers r ON r.id = t.router_id ORDER BY t.id DESC LIMIT 15');
+		?>
+		<div class="card">
+			<h2>Задачи для роутеров</h2>
+			<?php if (!$tasks): ?><p class="muted">Задач ещё не было.</p><?php endif; ?>
+			<?php foreach ($tasks as $t):
+				$st = ['queued' => '⏳ в очереди', 'sent' => '📨 у роутера', 'done' => '✅ готово', 'failed' => '❌ ошибка'][$t['status']] ?? $t['status']; ?>
+				<div class="item">
+					<span class="muted"><?= fmt_time($t['created_at']) ?> · <?= h($t['rname']) ?></span> &nbsp; <?= $st ?><br>
+					<?= h(task_label($t['type'], json_decode($t['payload'], true) ?: [])) ?>
+					<?php if ($t['result']): ?><div class="muted"><?= h($t['result']) ?></div><?php endif; ?>
+				</div>
+			<?php endforeach; ?>
+		</div>
+		<?php
+	});
+}
+
+function block_events(): string
+{
+	return capture(function () {
+		foreach (rows('SELECT e.*, r.name AS rname FROM events e LEFT JOIN routers r ON r.id = e.router_id ORDER BY e.id DESC LIMIT 50') as $e) {
+			?><div class="item"><span class="muted"><?= fmt_time($e['ts']) ?> · <?= h($e['rname'] ?? '') ?></span><br><?= h($e['text']) ?></div><?php
+		}
+	});
+}
+
+function all_blocks(): array
+{
+	$pending = rows("SELECT * FROM routers WHERE status = 'pending' ORDER BY id");
+	$routers = rows("SELECT * FROM routers WHERE status = 'active' ORDER BY name COLLATE NOCASE");
+	return [
+		'pending' => block_pending($pending),
+		'routers' => block_routers($routers),
+		'updates' => block_updates($routers),
+		'alerts' => block_alerts(),
+		'tasks' => block_tasks(),
+		'events' => block_events(),
+	];
+}
+
+// Тихое обновление данных: только блоки, в формате JSON
+if (isset($_GET['partial'])) {
+	header('Content-Type: application/json; charset=utf-8');
+	header('Cache-Control: no-store');
+	echo json_encode(all_blocks(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+	exit;
+}
+
+$blocks = all_blocks();
+panel_header('Обзор');
+?>
+	<?php if ($notice): ?><div class="notice"><?= h($notice) ?></div><?php endif; ?>
+
+	<div id="b-pending"><?= $blocks['pending'] ?></div>
+	<div id="b-routers"><?= $blocks['routers'] ?></div>
+	<div id="b-updates"><?= $blocks['updates'] ?></div>
+	<div id="b-alerts"><?= $blocks['alerts'] ?></div>
+	<div id="b-tasks"><?= $blocks['tasks'] ?></div>
 
 	<details class="card">
 		<summary><h2 style="display:inline">➕ Как подключить роутер</h2></summary>
@@ -241,9 +319,54 @@ panel_header('Обзор', !$pending);
 
 	<details class="card">
 		<summary><h2 style="display:inline">События</h2></summary>
-		<?php foreach ($events as $e): ?>
-			<div class="item"><span class="muted"><?= fmt_time($e['ts']) ?> · <?= h($e['rname'] ?? '') ?></span><br><?= h($e['text']) ?></div>
-		<?php endforeach; ?>
+		<div id="b-events"><?= $blocks['events'] ?></div>
 	</details>
+
+	<p class="muted" id="live-note" style="text-align:center">Данные обновляются сами, раз в 20 секунд.</p>
+
+	<script>
+	(function () {
+		// Последний полученный с сервера HTML каждого блока — сравниваем с ним, а не с DOM
+		const last = <?= json_encode($blocks, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG) ?>;
+
+		async function refresh() {
+			if (document.hidden) {
+				return;
+			}
+			let data;
+			try {
+				const r = await fetch('index.php?partial=1', { credentials: 'same-origin', cache: 'no-store' });
+				if (r.redirected || !r.ok || !(r.headers.get('content-type') || '').includes('json')) {
+					// Сессия истекла — пусть пользователь увидит страницу входа
+					if (r.redirected || r.status === 200) {
+						location.reload();
+					}
+					return;
+				}
+				data = await r.json();
+			} catch (e) {
+				return; // нет связи — попробуем в следующий раз
+			}
+			for (const [key, html] of Object.entries(data)) {
+				const el = document.getElementById('b-' + key);
+				if (!el) {
+					continue;
+				}
+				if (html === last[key]) {
+					continue;
+				}
+				// Не мешаем, если в этом блоке что-то вводят
+				const a = document.activeElement;
+				if (a && el.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) {
+					continue;
+				}
+				el.innerHTML = html;
+				last[key] = html;
+			}
+		}
+		setInterval(refresh, 20000);
+		document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+	})();
+	</script>
 <?php
 panel_footer();
