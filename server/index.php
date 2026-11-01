@@ -164,6 +164,9 @@ panel_header('Обзор', !$pending);
 				} else {
 					$status = '<span style="color:#22a06b;font-weight:600">на связи · всё работает</span>';
 				}
+				if (is_online($r)) {
+					$status .= ' <span class="muted">· запрос ' . ago($r['last_seen']) . '</span>';
+				}
 				?>
 				<div class="row" style="justify-content:space-between">
 					<b style="font-size:15px"><?= router_icon($r) ?> <?= h($r['name']) ?></b>
