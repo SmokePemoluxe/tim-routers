@@ -1,0 +1,9 @@
+Options -Indexes
+
+<FilesMatch "^(config|config\.sample|poll|dev-router)\.php$">
+	Require all denied
+</FilesMatch>
+
+<FilesMatch "\.(sqlite|sqlite-wal|sqlite-shm)$">
+	Require all denied
+</FilesMatch>

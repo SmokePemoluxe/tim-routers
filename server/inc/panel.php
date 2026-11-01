@@ -1,0 +1,108 @@
+<?php
+// Веб-панель: сессия, вход, защита форм, общее оформление.
+
+function panel_start(): void
+{
+	session_set_cookie_params([
+		'httponly' => true,
+		'samesite' => 'Lax',
+		'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+	]);
+	session_start();
+}
+
+function panel_authed(): bool
+{
+	return !empty($_SESSION['ok']);
+}
+
+function panel_require(): void
+{
+	if (!panel_authed()) {
+		header('Location: index.php');
+		exit;
+	}
+}
+
+function csrf_field(): string
+{
+	return '<input type="hidden" name="csrf" value="' . h($_SESSION['csrf'] ?? '') . '">';
+}
+
+function csrf_ok(): bool
+{
+	return !empty($_SESSION['csrf']) && hash_equals($_SESSION['csrf'], (string)($_POST['csrf'] ?? ''));
+}
+
+function panel_header(string $title, bool $autoRefresh = false): void
+{
+	?><!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<?php if ($autoRefresh): ?><meta http-equiv="refresh" content="30"><?php endif; ?>
+<title><?= h($title) ?> — роутеры</title>
+<style>
+	body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #f4f5f7; color: #1d2125; }
+	header { background: #1d2a3a; color: #fff; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+	header a { color: #9cc3ff; text-decoration: none; }
+	main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+	.card { background: #fff; border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+	h2 { font-size: 16px; margin: 0 0 10px; }
+	table { border-collapse: collapse; width: 100%; }
+	td, th { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eceef1; vertical-align: top; }
+	th { color: #626f86; font-weight: 600; font-size: 12px; }
+	.muted { color: #626f86; font-size: 12px; }
+	.notice { background: #fff4d6; padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; }
+	.notice.ok { background: #dcfff1; }
+	.notice.err { background: #ffe2dd; }
+	.msg { border-left: 3px solid #9cc3ff; padding: 4px 10px; margin: 6px 0; }
+	code { background: #eceef1; padding: 0 4px; border-radius: 3px; }
+	button, .btn { cursor: pointer; padding: 6px 12px; border: 1px solid #c1c7d0; background: #fff; border-radius: 4px; font: inherit; color: inherit; text-decoration: none; display: inline-block; }
+	button.primary { background: #0c66e4; border-color: #0c66e4; color: #fff; font-weight: 600; }
+	button.danger { color: #c9372c; }
+	.login { max-width: 320px; margin: 80px auto; }
+	input[type=text], input[type=password], select, textarea { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c1c7d0; border-radius: 4px; font: inherit; }
+	textarea { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+	label.field { display: block; margin: 8px 0 3px; font-weight: 600; font-size: 13px; }
+	.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+	@media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+	.lists { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+	.lists label { white-space: nowrap; font-size: 13px; }
+	.section { border: 1px solid #dfe1e6; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; background: #fff; }
+	.section.deleted { opacity: .45; }
+	.section-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+	.section-head b { font-size: 15px; }
+	.sticky { position: sticky; bottom: 0; background: #f4f5f7; padding: 10px 0; border-top: 1px solid #dfe1e6; }
+	.item { display: block; padding: 8px 0; border-bottom: 1px solid #eceef1; }
+	.item:last-child { border-bottom: 0; }
+	a.router-link { color: inherit; text-decoration: none; padding: 10px 8px; margin: 0 -8px; border-radius: 6px; }
+	a.router-link:hover { background: #f1f2f4; }
+	.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+	.row input[type=text] { width: auto; }
+	pre.cmd { background: #1d2a3a; color: #e6edf5; padding: 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+	details summary { cursor: pointer; }
+	button, .btn, input, select, textarea { min-height: 34px; }
+	@media (max-width: 600px) {
+		main { padding: 10px 8px; }
+		.card { padding: 12px; }
+		header { padding: 10px 12px; }
+		.sticky .muted { display: block; margin-top: 6px; }
+		.section { padding: 10px; }
+	}
+</style>
+</head>
+<body>
+<header>
+	<span><b>🛰 Роутеры</b><?php if (panel_authed()): ?> &nbsp; <a href="index.php">Обзор</a><?php endif; ?></span>
+	<?php if (panel_authed()): ?><a href="index.php?logout">выйти</a><?php endif; ?>
+</header>
+<main>
+<?php
+}
+
+function panel_footer(): void
+{
+	echo "</main>\n</body>\n</html>\n";
+}

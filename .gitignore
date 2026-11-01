@@ -1,0 +1,7 @@
+# Секреты и данные — никогда не в репозиторий
+server/config.php
+server/data/
+tools/diag.txt
+*.sqlite
+*.sqlite-*
+deploy/
