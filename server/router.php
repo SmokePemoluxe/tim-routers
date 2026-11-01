@@ -267,6 +267,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 					$_SESSION['flash'] = ['ok', "Обновление до «{$ref}» отправлено. Роутер скачает скрипты с GitHub и перезапустит их."];
 				}
 				break;
+			case 'update_podkop':
+				queue_task($rid, 'update_podkop');
+				$_SESSION['flash'] = ['ok', 'Обновление podkop отправлено. Роутер скачает официальный установщик podkop, обновит, очистит кэш LuCI и переподключит устройства — это займёт несколько минут.'];
+				break;
 			case 'delete':
 				q("UPDATE routers SET status = 'removed' WHERE id = ?", [$rid]);
 				q('DELETE FROM sections WHERE router_id = ?', [$rid]);
@@ -432,6 +436,9 @@ panel_header($router['name']);
 				<?= csrf_field() ?>
 				<input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег, например v1.4">
 				<button name="action" value="update">⬆️ Обновить скрипты</button>
+			</form>
+			<form method="post" onsubmit="return confirm('Обновить podkop на этом роутере? Откатить обновление podkop нельзя.')">
+				<?= csrf_field() ?><button name="action" value="update_podkop">📦 Обновить podkop<?= podkop_outdated((string)($info['podkop'] ?? '')) ? ' до ' . h(podkop_latest()) : '' ?></button>
 			</form>
 			<form method="post" onsubmit="return confirm('Удалить «<?= h(addslashes($router['name'])) ?>» из системы? Агент перестанет выходить на связь; чтобы вернуть роутер, агент нужно переустановить.')">
 				<?= csrf_field() ?><button name="action" value="delete" class="danger">🗑 Удалить из системы</button>

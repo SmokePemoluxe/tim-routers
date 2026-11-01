@@ -15,9 +15,10 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="1.6"
+VERSION="1.7"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
+PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
 
 BIN="/usr/bin/$NAME"
 INIT="/etc/init.d/$NAME"
@@ -382,6 +383,7 @@ run_tasks() {
 			apply_config) t_apply_config "$id" ;;
 			upload_report) t_report "$id" ;;
 			update) t_update "$id" ;;
+			update_podkop) t_update_podkop "$id" ;;
 			*) add_result "$id" false "агент $VERSION не знает задачу «$type» — обновите скрипты" ;;
 		esac
 		TASK_IDX=$((TASK_IDX + 1))
@@ -1019,6 +1021,53 @@ t_update() {
 	add_result "$id" true "скрипты обновлены до $ref (агент $new_ver)"
 	# Текущий процесс завершится после отправки результата, procd запустит новую версию
 	RESTART_FOR_UPDATE=1
+}
+
+# Обновление podkop официальным установщиком (адрес зашит в агенте, сервер его не выбирает).
+# На любые вопросы установщика отвечаем «нет»: так он никогда не сбросит настройки podkop
+# (это он предлагает для версий < 0.7) и не удалит конфликтующие пакеты — просто остановится.
+t_update_podkop() {
+	id=$1
+	if [ ! -x /etc/init.d/podkop ]; then
+		add_result "$id" false "podkop не установлен"
+		return
+	fi
+	old=$(podkop show_version 2>/dev/null | head -n 1)
+	case "$old" in
+		''|v0.[0-6].*|0.[0-6].*)
+			add_result "$id" false "podkop ${old:-неизвестной версии} слишком старый: обновление сбросит его настройки — обновите вручную по SSH (команда установки с --update-podkop)"
+			return
+			;;
+	esac
+	f="$RUN_DIR/podkop-install.sh"
+	ulog="$RUN_DIR/podkop-update.log"
+	mkdir -p "$RUN_DIR"
+	if ! curl -sfL -m 90 -o "$f" "$PODKOP_INSTALLER"; then
+		add_result "$id" false "не удалось скачать установщик podkop с GitHub"
+		return
+	fi
+	if ! head -n 1 "$f" | grep -q '^#!/bin/sh' || ! sh -n "$f"; then
+		add_result "$id" false "установщик podkop скачался повреждённым"
+		return
+	fi
+	log "обновляю podkop ($old)"
+	printf 'n\nn\nn\nn\nn\n' | sh "$f" > "$ulog" 2>&1
+	rc=$?
+	rm -f "$f"
+	# Совет разработчика podkop: после обновления очистить кэш LuCI
+	rm -rf /tmp/luci-*
+	new=$(podkop show_version 2>/dev/null | head -n 1)
+	if [ "$rc" != 0 ]; then
+		add_result "$id" false "установщик podkop остановился: $(grep -v '^[[:space:]]*$' "$ulog" | tail -n 2 | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' ')"
+		return
+	fi
+	/etc/init.d/podkop restart >/dev/null 2>&1
+	PODKOP_CHANGED=1
+	if [ "$new" = "$old" ]; then
+		add_result "$id" true "podkop уже последней версии ($new); кэш LuCI очищен"
+	else
+		add_result "$id" true "podkop обновлён: $old → $new; кэш LuCI очищен"
+	fi
 }
 
 # ---------- Режимы ----------

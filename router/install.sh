@@ -100,6 +100,8 @@ run_podkop_installer() {
 	sh /tmp/podkop-install.sh
 	rm -f /tmp/podkop-install.sh
 	[ -x /etc/init.d/podkop ] || die "podkop не установился"
+	# Совет разработчика podkop: после установки/обновления очистить кэш LuCI
+	rm -rf /tmp/luci-*
 }
 
 podkop_fresh=0

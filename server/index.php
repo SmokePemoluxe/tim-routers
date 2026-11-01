@@ -71,6 +71,29 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 			header('Location: index.php');
 			exit;
 		}
+	} elseif ($_POST['action'] === 'update_all') {
+		$ref = trim((string)($_POST['ref'] ?? ''));
+		if (preg_match('/^[A-Za-z0-9._-]{1,40}$/', $ref)) {
+			$ids = array_column(rows("SELECT id FROM routers WHERE status = 'active'"), 'id');
+			foreach ($ids as $id) {
+				queue_task((int)$id, 'update', ['ref' => $ref]);
+			}
+			$_SESSION['flash'] = 'Обновление скриптов до «' . $ref . '» отправлено на роутеров: ' . count($ids) . '. Каждый применит его при следующем выходе на связь (до 2 минут).';
+		}
+		header('Location: index.php');
+		exit;
+	} elseif ($_POST['action'] === 'podkop_all') {
+		$n = 0;
+		foreach (rows("SELECT * FROM routers WHERE status = 'active'") as $rr) {
+			if (podkop_outdated((string)(rinfo($rr)['podkop'] ?? ''))) {
+				queue_task((int)$rr['id'], 'update_podkop');
+				$n++;
+			}
+		}
+		$_SESSION['flash'] = $n ? "Обновление podkop отправлено на роутеров: $n (только где версия устарела). Займёт несколько минут; результат — в «Задачах» и уведомлениях."
+			: 'Устаревшего podkop нет ни на одном роутере.';
+		header('Location: index.php');
+		exit;
 	} elseif ($r && $r['status'] === 'pending' && $_POST['action'] === 'reject') {
 		q("UPDATE routers SET status = 'rejected' WHERE id = ?", [$rid]);
 		event($rid, 'Отклонён');
@@ -143,6 +166,31 @@ panel_header('Обзор', !$pending);
 			</a>
 		<?php endforeach; ?>
 	</div>
+
+	<?php
+	$outdated = 0;
+	foreach ($routers as $r) {
+		if (podkop_outdated((string)(rinfo($r)['podkop'] ?? ''))) {
+			$outdated++;
+		}
+	}
+	?>
+	<?php if ($routers): ?>
+	<div class="card">
+		<h2>⬆️ Обновления на всех роутерах</h2>
+		<form method="post" class="row" onsubmit="return confirm('Обновить скрипты (сторож и агент) на всех роутерах?')">
+			<?= csrf_field() ?>
+			<input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег">
+			<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
+		</form>
+		<form method="post" class="row" style="margin-top:8px" onsubmit="return confirm('Обновить podkop на роутерах, где он устарел? Откатить обновление podkop нельзя — лучше сначала проверить на одном роутере.')">
+			<?= csrf_field() ?>
+			<button name="action" value="podkop_all" <?= $outdated ? '' : 'disabled' ?>>📦 Обновить podkop на всех</button>
+			<span class="muted"><?= podkop_latest() ? 'последний podkop: ' . h(podkop_latest()) . ' · ' : '' ?>устарел на роутерах: <?= $outdated ?></span>
+		</form>
+		<p class="muted" style="margin-bottom:0">После выпуска новой версии скриптов подождите ~5 минут: GitHub не сразу отдаёт свежие файлы.</p>
+	</div>
+	<?php endif; ?>
 
 	<div class="card">
 		<h2>🔔 Уведомления</h2>

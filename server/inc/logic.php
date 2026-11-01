@@ -307,6 +307,8 @@ function task_label(string $type, array $p): string
 			return 'отчёт с роутера';
 		case 'update':
 			return 'обновление скриптов (' . ($p['ref'] ?? '') . ')';
+		case 'update_podkop':
+			return 'обновление podkop';
 		case 'apply_config':
 			$parts = ['секций: ' . count($p['sections'] ?? [])];
 			if (!empty($p['delete'])) {
