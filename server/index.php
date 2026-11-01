@@ -147,7 +147,7 @@ panel_header('Обзор', !$pending);
 	<?php endif; ?>
 
 	<div class="card">
-		<h2>Роутеры <span class="muted">🟢 <?= $cnt['🟢'] ?> · 🔴 <?= $cnt['🔴'] ?> · ⚫ <?= $cnt['⚫'] ?></span></h2>
+		<h2>Роутеры <span class="muted">🟢 всё работает: <?= $cnt['🟢'] ?> · 🔴 на связи, но есть проблема: <?= $cnt['🔴'] ?> · ⚫ не на связи: <?= $cnt['⚫'] ?></span></h2>
 		<?php if (!$routers): ?>
 			<p class="muted">Пока пусто. Как подключить роутер — внизу страницы.</p>
 		<?php endif; ?>
@@ -155,9 +155,19 @@ panel_header('Обзор', !$pending);
 			$sections = router_sections((int)$r['id']);
 			$byName = by_name($sections); ?>
 			<a class="item router-link" href="router.php?id=<?= (int)$r['id'] ?>">
+				<?php
+				$failed = array_map(fn($s) => $s['name'], array_filter($sections, 'section_failed'));
+				if (!is_online($r)) {
+					$status = '<span style="color:#626f86;font-weight:600">⚫ не на связи · последний раз ' . ago($r['last_seen']) . '</span>';
+				} elseif ($failed) {
+					$status = '<span style="color:#c9372c;font-weight:600">на связи · не работает: ' . h(implode(', ', $failed)) . '</span>';
+				} else {
+					$status = '<span style="color:#22a06b;font-weight:600">на связи · всё работает</span>';
+				}
+				?>
 				<div class="row" style="justify-content:space-between">
 					<b style="font-size:15px"><?= router_icon($r) ?> <?= h($r['name']) ?></b>
-					<span class="muted">на связи <?= ago($r['last_seen']) ?></span>
+					<span><?= $status ?></span>
 				</div>
 				<div class="muted"><?= router_hw_line(rinfo($r)) ?></div>
 				<div style="margin-top:4px">
