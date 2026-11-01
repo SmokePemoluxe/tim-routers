@@ -43,6 +43,10 @@ function panel_header(string $title, bool $autoRefresh = false): void
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <?php if ($autoRefresh): ?><meta http-equiv="refresh" content="30"><?php endif; ?>
 <title><?= h($title) ?> — роутеры</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="Роутеры">
+<meta name="theme-color" content="#1d2a3a">
 <style>
 	body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #f4f5f7; color: #1d2125; }
 	header { background: #1d2a3a; color: #fff; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
