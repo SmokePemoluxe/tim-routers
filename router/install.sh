@@ -52,6 +52,27 @@ case "$SERVER" in
 	*[\"\'\ \\]*) die "недопустимый адрес сервера" ;;
 esac
 
+# --- 0. Есть ли интернет ---
+# Частая ловушка: podkop установлен, но не настроен (нет ключа) — sing-box не запущен,
+# а DNS роутера всё равно направлен в него. Тогда пинг по IP проходит, а ни один сайт не открывается.
+podkop_stopped=0
+say "Проверяю интернет"
+if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 && ! ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; then
+	die "у роутера нет интернета (не проходит даже пинг до 8.8.8.8) — проверьте подключение WAN"
+fi
+if ! nslookup raw.githubusercontent.com >/dev/null 2>&1; then
+	if [ -x /etc/init.d/podkop ] && ! pidof sing-box >/dev/null; then
+		echo "podkop установлен, но не работает (скорее всего, в секции нет ключа) и ломает DNS роутера."
+		echo "Временно останавливаю podkop — после установки задайте ключ в панели, и он запустится."
+		/etc/init.d/podkop stop >/dev/null 2>&1
+		podkop_stopped=1
+		sleep 3
+	fi
+	nslookup raw.githubusercontent.com >/dev/null 2>&1 ||
+		die "не работает DNS роутера: пинг по IP есть, а адреса сайтов не узнаются. Проверьте DNS в LuCI (Сеть → DHCP и DNS)"
+fi
+echo "OK"
+
 pkg_install() {
 	if command -v apk >/dev/null 2>&1; then
 		apk update >/dev/null 2>&1
@@ -138,3 +159,6 @@ rm -rf "$d" /tmp/tr-install.sh
 say "Готово!"
 echo "Через 1–3 минуты роутер появится в панели в «Ждут подтверждения» — дайте ему имя и примите."
 echo "Ключ, домены и остальные настройки podkop — со страницы роутера в панели."
+if [ "$podkop_stopped" = "1" ]; then
+	printf '\n\033[33m%s\033[0m\n' "Важно: podkop сейчас остановлен. Сразу после подтверждения задайте ключ на странице роутера — агент запустит podkop."
+fi

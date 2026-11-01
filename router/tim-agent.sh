@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="1.5"
+VERSION="1.6"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 
@@ -71,8 +71,42 @@ json_num() {
 
 # ---------- Сеть ----------
 
+# Адрес сервера в обход DNS роутера (для curl --resolve): если DNS сломан — например, podkop
+# без ключа перехватил его, — спрашиваем публичные DNS напрямую. Иначе роутер пропал бы из панели
+# как раз тогда, когда его нужно чинить удалённо.
+server_resolve() {
+	host=$(printf '%s' "$SERVER" | sed -E 's#^[a-z]+://##; s#[/:].*##')
+	port=$(printf '%s' "$SERVER" | sed -nE 's#^[a-z]+://[^/:]+:([0-9]+).*#\1#p')
+	if [ -z "$port" ]; then
+		case "$SERVER" in https://*) port=443 ;; *) port=80 ;; esac
+	fi
+	for ns in 1.1.1.1 8.8.8.8 77.88.8.8; do
+		ip=$(nslookup "$host" "$ns" 2>/dev/null | sed -n '/^Name/,$p' | awk '/^Address/ && $2 !~ /:/ { print $2; exit }')
+		if [ -n "$ip" ]; then
+			echo "$host:$port:$ip"
+			return
+		fi
+	done
+}
+
+# curl к серверу; при ошибке «не удалось узнать адрес» (код 6) — повтор в обход DNS роутера
+server_curl() {
+	out=$(curl "$@")
+	rc=$?
+	if [ "$rc" = 6 ]; then
+		r=$(server_resolve)
+		if [ -n "$r" ]; then
+			log "DNS роутера не работает — связываюсь с сервером через публичный DNS"
+			out=$(curl --resolve "$r" "$@")
+			rc=$?
+		fi
+	fi
+	printf '%s' "$out"
+	return "$rc"
+}
+
 http_post() { # $1 — действие API, $2 — файл с телом запроса
-	curl -s -m 40 -X POST -H "X-Token: $TOKEN" -H 'Content-Type: application/json' \
+	server_curl -s -m 40 -X POST -H "X-Token: $TOKEN" -H 'Content-Type: application/json' \
 		--data-binary "@$2" "$SERVER/api.php?a=$1"
 }
 
@@ -941,7 +975,7 @@ t_report() {
 		echo "===== Журнал podkop / sing-box / агента"
 		logread 2>/dev/null | grep -iE "podkop|sing-box|$NAME" | tail -n 150
 	} > "$f" 2>&1
-	if curl -s -m 60 -X POST -H "X-Token: $TOKEN" --data-binary "@$f" "$SERVER/api.php?a=upload&task=$id" | grep -q '"ok":true'; then
+	if server_curl -s -m 60 -X POST -H "X-Token: $TOKEN" --data-binary "@$f" "$SERVER/api.php?a=upload&task=$id" | grep -q '"ok":true'; then
 		add_result "$id" true "отчёт отправлен"
 	else
 		add_result "$id" false "не удалось отправить отчёт"

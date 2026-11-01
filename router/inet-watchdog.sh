@@ -34,7 +34,7 @@
 # Отчёт:       inet-watchdog report > /tmp/report.txt
 # Настройки:   /etc/inet-watchdog.conf  (после правки: inet-watchdog restart)
 
-VERSION="3.3"
+VERSION="3.4"
 NAME="inet-watchdog"
 BIN="/usr/bin/$NAME"
 INIT="/etc/init.d/$NAME"
@@ -223,7 +223,7 @@ restart_wan() {
 		ifup "$i"
 	done
 	# podkop, запущенный без интернета, часто остаётся нерабочим — перезапускаем после WAN
-	if has_podkop; then
+	if has_podkop && [ -z "$(podkop_unconfigured)" ]; then
 		sleep 20
 		restart_podkop
 	fi
@@ -231,13 +231,40 @@ restart_wan() {
 
 restart_dns() {
 	if has_podkop; then
-		restart_podkop
+		u=$(podkop_unconfigured)
+		if [ -n "$u" ]; then
+			stop_unconfigured_podkop "$u"
+		else
+			restart_podkop
+		fi
 	else
 		/etc/init.d/dnsmasq restart
 	fi
 }
 
 # ---------- podkop ----------
+
+# Пусто — у всех секций «через прокси» задан ключ; иначе — имя секции без ключа.
+# podkop с такой секцией не может запуститься, но DNS роутера всё равно направляет в себя —
+# и у роутера пропадает интернет целиком. Перезапуск тут не поможет.
+podkop_unconfigured() {
+	for s in $(uci -q show podkop | sed -n 's/^podkop\.\([A-Za-z0-9_]*\)=section$/\1/p'); do
+		[ "$(uci -q get "podkop.$s.connection_type")" = "proxy" ] || continue
+		case "$(uci -q get "podkop.$s.proxy_config_type")" in
+			outbound) v=$(uci -q get "podkop.$s.outbound_json") ;;
+			urltest) v=$(uci -q get "podkop.$s.urltest_proxy_links") ;;
+			*) v=$(uci -q get "podkop.$s.proxy_string") ;;
+		esac
+		[ -n "$v" ] || { echo "$s"; return; }
+	done
+}
+
+# Ненастроенный podkop ломает DNS — останавливаем его (DNS вернётся к обычному), пока не зададут ключ.
+# Агент запустит podkop сам, когда ключ придёт из панели.
+stop_unconfigured_podkop() {
+	log_history "podkop не настроен (в секции $1 нет ключа) и ломает DNS роутера — останавливаю podkop до настройки"
+	/etc/init.d/podkop stop >/dev/null 2>&1
+}
 
 # Домен для проверки подмены DNS: первый свой домен первой секции «через прокси»,
 # а если своих доменов нет — известный домен из её готовых списков.
@@ -506,7 +533,16 @@ run() {
 				fi
 			elif [ $((now - last_pcheck)) -ge "$PODKOP_CHECK_EVERY" ]; then
 				last_pcheck=$now
-				pp=$(podkop_problem)
+				u=$(podkop_unconfigured)
+				if [ -n "$u" ]; then
+					# Не настроен: не перезапускаем; если он перехватил DNS — останавливаем
+					case " $(uci -q get dhcp.@dnsmasq[0].server) " in
+						*" 127.0.0.42 "*) pidof sing-box >/dev/null || stop_unconfigured_podkop "$u" ;;
+					esac
+					pp=""
+				else
+					pp=$(podkop_problem)
+				fi
 				if [ -z "$pp" ]; then
 					[ "$podkop_bad" -ge 2 ] && log_history "podkop снова работает"
 					podkop_bad=0
