@@ -563,6 +563,10 @@ function router_events(array $r, array $events): void
 				$b .= "\n   + " . h(mb_substr((string)$l, 0, 160));
 			}
 			$cfg[] = $b;
+		} elseif (($ev['type'] ?? '') === 'config_mass') {
+			$files = array_map(fn($x) => watch_label(preg_replace('/[^a-z_]/', '', (string)$x)), array_slice((array)($ev['files'] ?? []), 0, 15));
+			event($rid, 'Изменено сразу много настроек не через панель: ' . implode(', ', $files));
+			$cfg[] = '• изменено сразу много разделов: <b>' . h(implode(', ', $files)) . '</b> — похоже на сброс настроек или переустановку. Подробности — в LuCI роутера.';
 		} elseif (($ev['type'] ?? '') === 'login') {
 			$ip = (string)($ev['ip'] ?? '');
 			$via = ['luci' => 'LuCI', 'ssh' => 'SSH', 'terminal' => 'терминал'][$ev['via'] ?? ''] ?? (string)($ev['via'] ?? '?');

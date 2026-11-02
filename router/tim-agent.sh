@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.0"
+VERSION="2.1"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -350,22 +350,36 @@ add_event() { # JSON-строка события
 # $1: report — сообщить об изменениях; silent — только запомнить (после своих же задач)
 watch_check() {
 	mkdir -p "$WATCH_DIR" "$RUN_DIR"
+	now="$RUN_DIR/w.now.$$"
+	changed=""
+	evs="$RUN_DIR/w.events.$$"
+	: > "$evs"
 	for w in $WATCH_LIST; do
-		watch_dump "$w" > "$RUN_DIR/w.now" 2>/dev/null
+		watch_dump "$w" > "$now" 2>/dev/null
 		last="$WATCH_DIR/$w"
 		if [ ! -f "$last" ]; then
-			cp "$RUN_DIR/w.now" "$last"
+			cp "$now" "$last"
 			continue
 		fi
-		[ "$(md5sum < "$RUN_DIR/w.now")" = "$(md5sum < "$last")" ] && continue
+		[ "$(md5sum < "$now")" = "$(md5sum < "$last")" ] && continue
+		changed="$changed $w"
 		if [ "$1" = "report" ]; then
-			add_event "$(printf '{"type":"config","file":%s,"added":%s,"removed":%s}' "$(json_str "$w")" \
-				"$(grep -vxFf "$last" "$RUN_DIR/w.now" | head -n 12 | json_list)" \
-				"$(grep -vxFf "$RUN_DIR/w.now" "$last" | head -n 12 | json_list)")"
-			log "изменено не через панель: $w"
+			printf '{"type":"config","file":%s,"added":%s,"removed":%s}\n' "$(json_str "$w")" \
+				"$(grep -vxFf "$last" "$now" | head -n 12 | json_list)" \
+				"$(grep -vxFf "$now" "$last" | head -n 12 | json_list)" >> "$evs"
 		fi
-		cp "$RUN_DIR/w.now" "$last"
+		cp "$now" "$last"
 	done
+	if [ "$1" = "report" ] && [ -n "$changed" ]; then
+		log "изменено не через панель:$changed"
+		if [ "$(echo $changed | wc -w)" -gt 4 ]; then
+			# Сразу много разделов — похоже на сброс/переустановку: одно короткое событие, без подробностей
+			add_event "$(printf '{"type":"config_mass","files":%s}' "$(echo $changed | tr ' ' '\n' | json_list)")"
+		else
+			while IFS= read -r e; do add_event "$e"; done < "$evs"
+		fi
+	fi
+	rm -f "$now" "$evs"
 }
 
 # Входы в LuCI, по SSH и в веб-терминал — из системного журнала
@@ -619,7 +633,37 @@ register() {
 	log "зарегистрирован на $SERVER — подтвердите роутер в панели («Ждут подтверждения»)"
 }
 
+# Только один выход на связь за раз (служба и ручной «tim-agent sync» не должны пересекаться)
+sync_lock() {
+	l="$RUN_DIR/sync.lock"
+	mkdir -p "$RUN_DIR"
+	if ! mkdir "$l" 2>/dev/null; then
+		p=$(cat "$l/pid" 2>/dev/null)
+		if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+			return 1
+		fi
+		rm -rf "$l"
+		mkdir "$l" 2>/dev/null || return 1
+	fi
+	echo $$ > "$l/pid"
+}
+
+sync_unlock() {
+	rm -rf "$RUN_DIR/sync.lock"
+}
+
 sync_once() {
+	if ! sync_lock; then
+		log "другой выход на связь ещё идёт — пропускаю"
+		return 1
+	fi
+	sync_once_inner
+	rc=$?
+	sync_unlock
+	return $rc
+}
+
+sync_once_inner() {
 	if [ -z "$TOKEN" ]; then
 		register || return 1
 	fi
@@ -1516,7 +1560,10 @@ run() {
 		# Результаты задач отправляем сразу, не дожидаясь следующего цикла
 		[ "$TASKS_DONE" = 1 ] && sync_once
 		[ "$RESTART_FOR_UPDATE" = 1 ] && exit 0
-		[ "$STATUS" = "active" ] && subs_tick
+		if [ "$STATUS" = "active" ] && sync_lock; then
+			subs_tick
+			sync_unlock
+		fi
 		case "$STATUS" in
 			rejected|removed) sleep 3600 ;;
 			pending) sleep 60 ;;
