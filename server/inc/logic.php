@@ -149,9 +149,21 @@ function section_line(array $s, array $byName = []): string
 	if (($d['type'] ?? '') === 'block') {
 		return $t . 'блокирует домены';
 	}
-	$t .= h($d['scheme'] ?? '?');
-	if (!empty($d['host'])) {
-		$t .= ' ' . h($d['host']);
+	if (is_array($d['sub'] ?? null)) {
+		// Подписка: сколько серверов живо и какой сейчас выбран
+		$srv = $d['sub']['servers'] ?? [];
+		$alive = count(array_filter($srv, fn($x) => !empty($x['delay'])));
+		$t .= 'подписка · отвечают ' . $alive . ' из ' . count($srv);
+		foreach ($srv as $x) {
+			if (!empty($x['now'])) {
+				$t .= ' · сейчас ' . h($x['name'] ?: $x['host']);
+			}
+		}
+	} else {
+		$t .= h($d['scheme'] ?? '?');
+		if (!empty($d['host'])) {
+			$t .= ' ' . h($d['host']);
+		}
 	}
 	if ($s['ok'] !== null && (int)$s['ok'] === 1) {
 		$t .= ' · ' . (int)($d['delay'] ?? 0) . ' мс';
@@ -318,6 +330,8 @@ function task_label(string $type, array $p): string
 			return 'обновление скриптов (' . ($p['ref'] ?? '') . ')';
 		case 'update_podkop':
 			return 'обновление podkop';
+		case 'refresh_subscription':
+			return 'обновление списка серверов подписки ' . $sec;
 		case 'apply_config':
 			$parts = ['секций: ' . count($p['sections'] ?? [])];
 			if (!empty($p['delete'])) {
@@ -331,7 +345,7 @@ function task_label(string $type, array $p): string
 // Ключи не храним дольше, чем нужно: после успешного применения вычищаем их из задачи.
 function scrub_keys(array $p): array
 {
-	foreach (['key', 'outbound'] as $f) {
+	foreach (['key', 'outbound', 'sub_url'] as $f) {
 		if (!empty($p[$f])) {
 			$p[$f] = '***';
 		}

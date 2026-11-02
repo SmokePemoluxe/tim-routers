@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="1.9"
+VERSION="2.0"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -213,7 +213,7 @@ section_json() {
 		dynamic) subnets=$(opt "$s" user_subnets | tr ' ' '\n') ;;
 		*) subnets="" ;;
 	esac
-	printf '{"name":%s,"type":%s,"config":%s,"scheme":%s,"host":%s,"interface":%s,"dr_enabled":%s,"dr_type":%s,"dr_server":%s,"detour":%s,"delay":%s,"error":%s,"list_type":%s,"subnets":%s,"domains":%s,"community":%s,"remote":%s}' \
+	printf '{"name":%s,"type":%s,"config":%s,"scheme":%s,"host":%s,"interface":%s,"dr_enabled":%s,"dr_type":%s,"dr_server":%s,"detour":%s,"delay":%s,"error":%s,"list_type":%s,"subnets":%s,"domains":%s,"community":%s,"remote":%s,"sub":%s}' \
 		"$(json_str "$s")" "$(json_str "$ct")" "$(json_str "$pc")" "$(json_str "$scheme")" "$(json_str "$host")" \
 		"$(json_str "$vif")" "$([ "$(opt "$s" domain_resolver_enabled)" = 1 ] && echo true || echo false)" \
 		"$(json_str "$(opt "$s" domain_resolver_dns_type)")" "$(json_str "$(opt "$s" domain_resolver_dns_server)")" \
@@ -221,7 +221,8 @@ section_json() {
 		"$(printf '%s\n' "$subnets" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | json_list)" \
 		"$(printf '%s\n' "$domains" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | json_list)" \
 		"$(opt "$s" community_lists | tr ' ' '\n' | json_list)" \
-		"$(opt "$s" remote_domain_lists | tr ' ' '\n' | json_list)"
+		"$(opt "$s" remote_domain_lists | tr ' ' '\n' | json_list)" \
+		"$(sub_json "$s")"
 }
 
 sections_json() {
@@ -407,6 +408,192 @@ events_json() {
 
 # ---------- Обмен с сервером ----------
 
+# ---------- Подписки (ссылка, по которой провайдер отдаёт список ключей) ----------
+# Роутер сам раз в SUB_EVERY секунд (и сразу, если секция не работает) берёт свежий список,
+# оставляет то, что умеет podkop, и кладёт в секцию режимом автовыбора (urltest).
+# Ссылка хранится только здесь, на роутере.
+# Для провайдера роутер — обычное приложение на телефоне с постоянным идентификатором:
+# одно «устройство» в лимите подписки, без лишних отметок.
+
+SUB_DIR="$CONF_DIR/subs"
+SUB_EVERY=21600
+SUB_UA="Incy/2.1 CFNetwork/1568.100.1 Darwin/24.0.0"
+
+sub_hwid() {
+	if [ ! -s "$CONF_DIR/sub_hwid" ]; then
+		mkdir -p "$CONF_DIR"
+		cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c1-16 > "$CONF_DIR/sub_hwid"
+	fi
+	cat "$CONF_DIR/sub_hwid"
+}
+
+urldecode() {
+	printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')"
+}
+
+# Скачать список ключей по ссылке → строки «схема://…» в $2. Сначала как обычный клиент,
+# затем как приложение (многие провайдеры отдают ключи только приложениям).
+sub_fetch() {
+	url=$1
+	out=$2
+	raw="$RUN_DIR/sub.raw"
+	for mode in plain app; do
+		if [ "$mode" = plain ]; then
+			curl -sSfL -m 30 -o "$raw" "$url" 2>/dev/null || continue
+		else
+			curl -sSfL -m 30 -A "$SUB_UA" -H "x-hwid: $(sub_hwid)" -H "x-device-os: iOS" -H "x-ver-os: 18.1" \
+				-H "x-device-model: iPhone" -o "$raw" "$url" 2>/dev/null || continue
+		fi
+		if grep -qi '<html' "$raw"; then
+			continue
+		elif grep -qE '^[a-z0-9]+://' "$raw"; then
+			tr -d '\r' < "$raw" > "$out"
+		elif base64 -d "$raw" 2>/dev/null | tr -d '\r' > "$out" && grep -qE '^[a-z0-9]+://' "$out"; then
+			:
+		else
+			continue
+		fi
+		# Одни заглушки (0.0.0.0, порт 1) — значит, этому клиенту ключи не отдали
+		if grep -E '^[a-z0-9]+://' "$out" | grep -vqE '@(0\.0\.0\.0|127\.0\.0\.1):'; then
+			rm -f "$raw"
+			return 0
+		fi
+	done
+	rm -f "$raw"
+	return 1
+}
+
+# Оставить ключи, которые понимает podkop/sing-box, и выкинуть серверы со словами из исключений
+sub_filter() { # $1 — исключения через запятую; stdin → stdout
+	while IFS= read -r l; do
+		case "$l" in
+			vless://*|hysteria2://*|hy2://*|trojan://*|ss://*) ;;
+			*) continue ;;
+		esac
+		printf '%s' "$l" | grep -qE '@(0\.0\.0\.0|127\.0\.0\.1):|[?&]type=xhttp|[?&](mode|extra)=' && continue
+		valid_key "$l" || continue
+		name=$(urldecode "${l#*#}")
+		skip=0
+		oldifs=$IFS
+		IFS=','
+		for w in $1; do
+			w=$(echo "$w" | sed 's/^ *//; s/ *$//')
+			[ -n "$w" ] || continue
+			case "$name" in *"$w"*) skip=1 ;; esac
+		done
+		IFS=$oldifs
+		[ "$skip" = 0 ] && printf '%s\n' "$l"
+	done
+}
+
+# Обновить секцию из её подписки. 0 — ок (SUB_CHANGED=1, если список ключей поменялся); 1 — ошибка (SUB_ERR)
+sub_refresh() { # секция
+	s=$1
+	f="$SUB_DIR/$s"
+	SUB_ERR=""
+	[ -s "$f.url" ] || { SUB_ERR="подписка не задана"; return 1; }
+	mkdir -p "$RUN_DIR"
+	date +%s > "$RUN_DIR/sub_$s.ts"
+	if ! sub_fetch "$(cat "$f.url")" "$RUN_DIR/sub_$s.all"; then
+		SUB_ERR="подписка не отдала ключи — закончилась оплата, занят лимит устройств или ссылка неверна"
+		echo "$SUB_ERR" > "$f.err"
+		return 1
+	fi
+	grep -E '^[a-z0-9]+://' "$RUN_DIR/sub_$s.all" | sub_filter "$(cat "$f.exclude" 2>/dev/null)" > "$RUN_DIR/sub_$s.use"
+	total=$(grep -cE '^[a-z0-9]+://' "$RUN_DIR/sub_$s.all")
+	usable=$(grep -c . "$RUN_DIR/sub_$s.use")
+	if [ "$usable" -eq 0 ]; then
+		SUB_ERR="в подписке нет серверов, которые подходят для podkop (из $total)"
+		echo "$SUB_ERR" > "$f.err"
+		rm -f "$RUN_DIR/sub_$s.all" "$RUN_DIR/sub_$s.use"
+		return 1
+	fi
+	rm -f "$f.err"
+	echo "$total $usable $(date +%s)" > "$f.stat"
+	# Названия серверов (без ключей) — для показа в панели
+	while IFS= read -r l; do
+		printf '%s|%s|%s\n' "$(host_of "$l")" "${l%%://*}" "$(urldecode "${l#*#}" | tr -d '|')"
+	done < "$RUN_DIR/sub_$s.use" > "$f.names"
+	cur=$(uci -q get "podkop.$s.urltest_proxy_links" | tr ' ' '\n')
+	if [ "$(opt "$s" proxy_config_type)" != "urltest" ] || [ "$cur" != "$(cat "$RUN_DIR/sub_$s.use")" ]; then
+		uci set "podkop.$s.proxy_config_type=urltest"
+		uci -q delete "podkop.$s.urltest_proxy_links"
+		while IFS= read -r l; do
+			uci add_list "podkop.$s.urltest_proxy_links=$l"
+		done < "$RUN_DIR/sub_$s.use"
+		uci -q delete "podkop.$s.proxy_string"
+		uci -q delete "podkop.$s.outbound_json"
+		SUB_CHANGED=1
+	fi
+	rm -f "$RUN_DIR/sub_$s.all" "$RUN_DIR/sub_$s.use"
+	return 0
+}
+
+# Плановое обновление всех подписок: раз в SUB_EVERY или сразу, если секция не работает
+subs_tick() {
+	[ -d "$SUB_DIR" ] || return 0
+	SUB_CHANGED=0
+	now=$(date +%s)
+	for u in "$SUB_DIR"/*.url; do
+		[ -f "$u" ] || continue
+		s=$(basename "$u" .url)
+		is_section "$s" || continue
+		last=$(cat "$RUN_DIR/sub_$s.ts" 2>/dev/null || echo 0)
+		due=0
+		[ $((now - last)) -ge "$SUB_EVERY" ] && due=1
+		if [ "$due" = 0 ] && [ $((now - last)) -ge 600 ]; then
+			clash_api_addr
+			section_delay "$s" 1
+			[ -n "$DELAY" ] || due=1
+		fi
+		if [ "$due" = 1 ]; then
+			if sub_refresh "$s"; then
+				log "подписка $s обновлена"
+			else
+				log "подписка $s: $SUB_ERR"
+			fi
+		fi
+	done
+	if [ "$SUB_CHANGED" = 1 ]; then
+		uci commit podkop
+		podkop_apply
+		PODKOP_CHANGED=0
+		watch_check silent
+	fi
+}
+
+# Сведения о подписке секции для панели (JSON) — без ссылки и ключей
+sub_json() { # секция
+	f="$SUB_DIR/$1"
+	if [ ! -s "$f.url" ]; then
+		printf 'null'
+		return
+	fi
+	set -- "$1" $(cat "$f.stat" 2>/dev/null)
+	tag="$1-urltest-out"
+	proxies=$(clash_get "/proxies" 2>/dev/null)
+	now=$(jsonfilter -s "$proxies" -e "@.proxies[\"$tag\"].now" 2>/dev/null)
+	cfg=$(uci -q get podkop.settings.config_path)
+	[ -n "$cfg" ] || cfg=/etc/sing-box/config.json
+	nowhost=""
+	[ -n "$now" ] && nowhost=$(jsonfilter -i "$cfg" -e "@.outbounds[@.tag=\"$now\"].server" 2>/dev/null)
+	servers=""
+	for m in $(jsonfilter -s "$proxies" -e "@.proxies[\"$tag\"].all[*]" 2>/dev/null); do
+		h=$(jsonfilter -i "$cfg" -e "@.outbounds[@.tag=\"$m\"].server" 2>/dev/null)
+		p=$(jsonfilter -i "$cfg" -e "@.outbounds[@.tag=\"$m\"].server_port" 2>/dev/null)
+		d=$(jsonfilter -s "$proxies" -e "@.proxies[\"$m\"].history[*].delay" 2>/dev/null | tail -n 1)
+		line=$(grep -m 1 "^$h:$p|" "$f.names" 2>/dev/null || grep -m 1 "^$h:" "$f.names" 2>/dev/null)
+		servers="$servers${servers:+,}$(printf '{"host":%s,"type":%s,"name":%s,"delay":%s,"now":%s}' \
+			"$(json_str "$h${p:+:$p}")" "$(json_str "$(echo "$line" | cut -d'|' -f2)")" \
+			"$(json_str "$(echo "$line" | cut -d'|' -f3)")" "$(json_num "$d")" \
+			"$([ "$m" = "$now" ] && echo true || echo false)")"
+	done
+	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"error":%s,"now":%s,"servers":[%s]}' \
+		"$(json_num "$2")" "$(json_num "$3")" "$(json_num "$4")" \
+		"$(json_str "$(cat "$f.exclude" 2>/dev/null)")" "$(json_str "$(cat "$f.err" 2>/dev/null)")" \
+		"$(json_str "$nowhost")" "$servers"
+}
+
 register() {
 	mkdir -p "$RUN_DIR"
 	{
@@ -515,6 +702,7 @@ run_tasks() {
 			upload_report) t_report "$id" ;;
 			update) t_update "$id" ;;
 			update_podkop) t_update_podkop "$id" ;;
+			refresh_subscription) t_refresh_subscription "$id" ;;
 			*) add_result "$id" false "агент $VERSION не знает задачу «$type» — обновите скрипты" ;;
 		esac
 		TASK_IDX=$((TASK_IDX + 1))
@@ -917,6 +1105,7 @@ check_changed_keys() {
 t_apply_config() {
 	id=$1
 	errors=""
+	KEY_NOTES=""
 	rm -rf "$RUN_DIR/changed_keys" "$RUN_DIR/rollback"
 
 	# --- DNS ---
@@ -965,6 +1154,7 @@ t_apply_config() {
 			ob=""
 		fi
 
+		NEW_SECTION=""
 		vif=$(sec_field interface)
 		if [ -n "$vif" ] && ! valid_iface "$vif"; then
 			errors="$errors; $name: недопустимое имя VPN-интерфейса"
@@ -974,8 +1164,8 @@ t_apply_config() {
 		if ! is_section "$name"; then
 			case "$ct" in
 				proxy)
-					if [ -z "$key" ] && [ -z "$ob" ]; then
-						errors="$errors; $name: для новой секции через прокси нужен ключ"
+					if [ -z "$key" ] && [ -z "$ob" ] && [ "$(sec_field sub_on)" != "true" ]; then
+						errors="$errors; $name: для новой секции через прокси нужен ключ или подписка"
 						SEC_IDX=$((SEC_IDX + 1))
 						continue
 					fi
@@ -996,10 +1186,13 @@ t_apply_config() {
 			esac
 			uci set "podkop.$name=section"
 			uci set "podkop.$name.connection_type=$ct"
+			NEW_SECTION=$name
 			if [ "$ct" = "proxy" ]; then
-				snapshot_key "$name" new
+				[ -n "$key$ob" ] && snapshot_key "$name" new
 				if [ -n "$ob" ]; then
 					set_outbound "$name" "$ob"
+				elif [ -z "$key" ]; then
+					uci set "podkop.$name.proxy_config_type=urltest"
 				else
 					uci set "podkop.$name.proxy_config_type=url"
 					uci set "podkop.$name.proxy_string=$key"
@@ -1050,6 +1243,38 @@ t_apply_config() {
 			fi
 		fi
 
+		# Источник ключей — подписка: ссылку храним только на роутере, ключи берём из неё
+		su=$(sec_field sub_url)
+		if [ "$(sec_field sub_off)" = "true" ] && [ -f "$SUB_DIR/$name.url" ]; then
+			rm -f "$SUB_DIR/$name".*
+		fi
+		if [ "$(sec_field sub_on)" = "true" ]; then
+			mkdir -p "$SUB_DIR"
+			chmod 700 "$SUB_DIR"
+			if [ -n "$su" ]; then
+				case "$su" in
+					http://?*|https://?*) (umask 077; printf '%s' "$su" > "$SUB_DIR/$name.url") ;;
+					*) errors="$errors; $name: ссылка подписки должна начинаться с https://" ;;
+				esac
+			fi
+			printf '%s' "$(sec_field sub_exclude | tr -cd 'A-Za-zА-Яа-яЁё0-9 ,._-')" > "$SUB_DIR/$name.exclude"
+			if [ -s "$SUB_DIR/$name.url" ]; then
+				SUB_CHANGED=0
+				if sub_refresh "$name"; then
+					set -- $(cat "$SUB_DIR/$name.stat")
+					KEY_NOTES="$KEY_NOTES; $name: из подписки взято серверов: $2 из $1"
+				else
+					errors="$errors; $name: $SUB_ERR"
+					if [ "$NEW_SECTION" = "$name" ] && [ -z "$(uci -q get "podkop.$name.urltest_proxy_links")" ]; then
+						uci delete "podkop.$name"
+						rm -f "$SUB_DIR/$name".*
+						errors="$errors (секция $name не создана)"
+						SEC_IDX=$((SEC_IDX + 1))
+						continue
+					fi
+				fi
+			fi
+		fi
 		# VPN: интерфейс и (по желанию) отдельный DNS для доменов этой секции
 		if [ "$(opt "$name" connection_type)" = "vpn" ]; then
 			[ -n "$vif" ] && uci set "podkop.$name.interface=$vif"
@@ -1111,8 +1336,10 @@ $d"
 		fi
 	done
 
+	SUB_NOTES=$KEY_NOTES
 	podkop_apply
 	check_changed_keys
+	KEY_NOTES="$SUB_NOTES$KEY_NOTES"
 
 	if [ -n "$errors" ]; then
 		add_result "$id" false "применено частично${KEY_NOTES}; ошибки${errors}"
@@ -1200,6 +1427,28 @@ t_update() {
 	RESTART_FOR_UPDATE=1
 }
 
+# Обновить список серверов подписки сейчас (кнопка на сайте)
+t_refresh_subscription() {
+	id=$1
+	s=$(task_field section)
+	if ! is_section "$s" || [ ! -s "$SUB_DIR/$s.url" ]; then
+		add_result "$id" false "у секции $s нет подписки"
+		return
+	fi
+	SUB_CHANGED=0
+	if sub_refresh "$s"; then
+		set -- $(cat "$SUB_DIR/$s.stat")
+		if [ "$SUB_CHANGED" = 1 ]; then
+			uci commit podkop
+			podkop_apply
+			add_result "$id" true "список серверов обновлён: подходят $2 из $1"
+		else
+			add_result "$id" true "список серверов не изменился: подходят $2 из $1"
+		fi
+	else
+		add_result "$id" false "$SUB_ERR"
+	fi
+}
 # Обновление podkop официальным установщиком (адрес зашит в агенте, сервер его не выбирает).
 # На любые вопросы установщика отвечаем «нет»: так он никогда не сбросит настройки podkop
 # (это он предлагает для версий < 0.7) и не удалит конфликтующие пакеты — просто остановится.
@@ -1267,6 +1516,7 @@ run() {
 		# Результаты задач отправляем сразу, не дожидаясь следующего цикла
 		[ "$TASKS_DONE" = 1 ] && sync_once
 		[ "$RESTART_FOR_UPDATE" = 1 ] && exit 0
+		[ "$STATUS" = "active" ] && subs_tick
 		case "$STATUS" in
 			rejected|removed) sleep 3600 ;;
 			pending) sleep 60 ;;

@@ -7,7 +7,7 @@ require __DIR__ . '/inc/panel.php';
 panel_start();
 panel_require();
 
-const MIN_AGENT = '1.8';
+const MIN_AGENT = '2.0';
 
 $rid = (int)($_GET['id'] ?? 0);
 $router = get_router($rid);
@@ -41,6 +41,10 @@ function sections_from_db(int $rid): array
 			'dr_server' => (string)($d['dr_server'] ?? ''),
 			'cur_detour' => (string)($d['detour'] ?? ''),
 			'key' => '',
+			'sub' => is_array($d['sub'] ?? null) ? $d['sub'] : null,
+			'source' => is_array($d['sub'] ?? null) ? 'sub' : 'key',
+			'sub_url' => '',
+			'sub_exclude' => is_array($d['sub'] ?? null) ? (string)($d['sub']['exclude'] ?? '') : 'Россия',
 			'domains' => implode("\n", $d['domains'] ?? []),
 			'subnets' => implode("\n", $d['subnets'] ?? []),
 			'community' => $d['community'] ?? [],
@@ -63,7 +67,7 @@ function sections_from_post(int $rid): array
 			continue;
 		}
 		$orig = (string)($p['orig'] ?? '');
-		$base = $db[$orig] ?? ['config' => 'url', 'status' => '', 'cur_detour' => ''];
+		$base = $db[$orig] ?? ['config' => 'url', 'status' => '', 'cur_detour' => '', 'sub' => null];
 		$out[] = [
 			'orig' => $orig,
 			'name' => $orig !== '' ? $orig : trim((string)($p['name'] ?? '')),
@@ -77,6 +81,10 @@ function sections_from_post(int $rid): array
 			'dr_server' => trim((string)($p['dr_server'] ?? '')),
 			'cur_detour' => $base['cur_detour'],
 			'key' => trim((string)($p['key'] ?? '')),
+			'sub' => $base['sub'],
+			'source' => ($p['source'] ?? 'key') === 'sub' ? 'sub' : 'key',
+			'sub_url' => trim((string)($p['sub_url'] ?? '')),
+			'sub_exclude' => trim((string)($p['sub_exclude'] ?? '')),
 			'domains' => (string)($p['domains'] ?? ''),
 			'subnets' => (string)($p['subnets'] ?? ''),
 			'community' => array_values(array_filter((array)($p['community'] ?? []), fn($l) => is_string($l) && preg_match('/^[a-z0-9_]{1,30}$/', $l))),
@@ -170,7 +178,7 @@ function build_payload(array $sections, array $settings): array
 		if ($s['key'] !== '' && !valid_key($s['key'])) {
 			$errors[] = "{$s['name']}: ключ не похож на ссылку прокси (hy2://, vless://, ss://, trojan://…)";
 		}
-		if ($s['orig'] === '' && $s['type'] === 'proxy' && $s['key'] === '') {
+		if ($s['orig'] === '' && $s['type'] === 'proxy' && $s['key'] === '' && $s['source'] !== 'sub') {
 			$errors[] = "{$s['name']}: для новой секции через прокси нужен ключ";
 		}
 
@@ -202,7 +210,25 @@ function build_payload(array $sections, array $settings): array
 				$detour = '';
 			}
 		}
-		if ($s['type'] === 'proxy') {
+		// Источник ключей — подписка
+		$subOn = $s['type'] === 'proxy' && $s['source'] === 'sub';
+		$subOff = !$subOn && !empty($s['sub']);
+		if ($subOn) {
+			if ($s['sub_url'] !== '' && !preg_match('#^https?://[^\s"\'\\\\<>]+$#', $s['sub_url'])) {
+				$errors[] = "{$s['name']}: ссылка подписки должна начинаться с https:// и быть без пробелов";
+			}
+			if ($s['sub_url'] === '' && empty($s['sub'])) {
+				$errors[] = "{$s['name']}: вставьте ссылку подписки";
+			}
+			if ($detour !== '') {
+				$errors[] = "{$s['name']}: секцию с подпиской пока нельзя пустить через другую секцию";
+			}
+			$key = '';
+			$detour = '';
+		} elseif ($subOff && $s['type'] === 'proxy' && $key === '') {
+			$errors[] = "{$s['name']}: чтобы перейти с подписки на один ключ, вставьте ключ";
+		}
+		if ($s['type'] === 'proxy' && !$subOn) {
 			if ($key !== '' && $detour !== '') {
 				$conv = link_to_outbound($key, $s['name'], $detour);
 				if ($conv['ok']) {
@@ -231,6 +257,10 @@ function build_payload(array $sections, array $settings): array
 			'dr_server' => $s['dr_server'],
 			'set_detour' => $setDetour,
 			'detour' => $detour,
+			'sub_on' => $subOn,
+			'sub_url' => $subOn ? $s['sub_url'] : '',
+			'sub_exclude' => $subOn ? mb_substr(preg_replace('/[^\p{L}\p{N} ,._-]/u', '', $s['sub_exclude']), 0, 200) : '',
+			'sub_off' => $subOff,
 			'domains' => $domains,
 			'subnets' => $subnets,
 			'community' => $s['community'],
@@ -269,6 +299,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 	if (!csrf_ok()) {
 		$errors[] = 'Форма устарела — обновите страницу и повторите.';
 	} else {
+		// «🔄 Обновить список серверов» у секции с подпиской
+		if (preg_match('/^sub_refresh:([A-Za-z][A-Za-z0-9_]{0,29})$/', (string)$_POST['action'], $m)) {
+			queue_task($rid, 'refresh_subscription', ['section' => $m[1]]);
+			audit('обновление списка серверов подписки секции ' . $m[1] . ' на роутере «' . $router['name'] . '»');
+			$_SESSION['flash'] = ['ok', 'Роутер обновит список серверов подписки секции ' . $m[1] . ' при следующем выходе на связь (до 2 минут).'];
+			header('Location: router.php?id=' . $rid);
+			exit;
+		}
 		switch ($_POST['action']) {
 			case 'rename':
 				$name = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)($_POST['name'] ?? ''))), 0, 40);
@@ -398,19 +436,47 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 			</div>
 			<div>
 				<div data-for="proxy">
-					<label class="field">Ключ (ссылка)</label>
-					<?php if ($keyEditable): ?>
-						<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="<?= $isNew ? 'hy2://…' : 'оставьте пустым — ключ не изменится' ?>" autocomplete="off" spellcheck="false">
-					<?php else: ?>
-						<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="задан как «<?= h($s['config']) ?>» — вставьте ссылку, чтобы заменить" autocomplete="off" spellcheck="false">
-					<?php endif; ?>
-					<label class="field">Пустить через <span class="muted">(цепочка: эта секция ходит через другую)</span></label>
-					<select name="sections[<?= $i ?>][detour]">
-						<option value="">— напрямую в интернет —</option>
-						<?php foreach ($proxyNames as $n): if ($n === $s['name']) continue; ?>
-							<option value="<?= h($n) ?>" <?= $s['detour'] === $n ? 'selected' : '' ?>>через <?= h($n) ?></option>
-						<?php endforeach; ?>
+					<label class="field">Источник ключей</label>
+					<select name="sections[<?= $i ?>][source]" onchange="showSource(this)">
+						<option value="key" <?= $s['source'] === 'key' ? 'selected' : '' ?>>🔑 Один ключ</option>
+						<option value="sub" <?= $s['source'] === 'sub' ? 'selected' : '' ?>>📋 Подписка — ключи обновляются сами</option>
 					</select>
+					<div data-src="key">
+						<label class="field">Ключ (ссылка)</label>
+						<?php if ($keyEditable): ?>
+							<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="<?= $isNew ? 'hy2://…' : 'оставьте пустым — ключ не изменится' ?>" autocomplete="off" spellcheck="false">
+						<?php else: ?>
+							<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="задан как «<?= h($s['config']) ?>» — вставьте ссылку, чтобы заменить" autocomplete="off" spellcheck="false">
+						<?php endif; ?>
+						<label class="field">Пустить через <span class="muted">(цепочка: эта секция ходит через другую)</span></label>
+						<select name="sections[<?= $i ?>][detour]">
+							<option value="">— напрямую в интернет —</option>
+							<?php foreach ($proxyNames as $n): if ($n === $s['name']) continue; ?>
+								<option value="<?= h($n) ?>" <?= $s['detour'] === $n ? 'selected' : '' ?>>через <?= h($n) ?></option>
+							<?php endforeach; ?>
+						</select>
+					</div>
+					<div data-src="sub">
+						<label class="field">Ссылка подписки</label>
+						<input type="text" name="sections[<?= $i ?>][sub_url]" value="" placeholder="<?= $s['sub'] ? 'подписка задана — вставьте новую ссылку, чтобы заменить' : 'https://… (та, что импортируется в Happ / INCY)' ?>" autocomplete="off" spellcheck="false">
+						<div class="muted">Ссылка хранится только на роутере. Роутер сам обновляет список серверов раз в 6 ч и сразу, если секция перестала работать.</div>
+						<label class="field">Не использовать серверы, в названии которых есть <span class="muted">(через запятую)</span></label>
+						<input type="text" name="sections[<?= $i ?>][sub_exclude]" value="<?= h($s['sub_exclude']) ?>" placeholder="например: Россия">
+						<?php if ($sub = $s['sub']): ?>
+							<div style="margin-top:8px">
+								<?php if (!empty($sub['error'])): ?><div class="notice err" style="margin:0 0 6px"><?= h($sub['error']) ?></div><?php endif; ?>
+								<span class="muted">Обновлено <?= $sub['updated'] ? ago($sub['updated']) : '—' ?> · подходят <?= (int)$sub['usable'] ?> из <?= (int)$sub['total'] ?> серверов</span>
+								<?php $srv = $sub['servers'] ?? []; $alive = count(array_filter($srv, fn($x) => !empty($x['delay']))); ?>
+								<details style="margin-top:4px">
+									<summary>Серверы: отвечают <?= $alive ?> из <?= count($srv) ?><?php foreach ($srv as $x) { if (!empty($x['now'])) { echo ' · сейчас: ' . h($x['name'] ?: $x['host']); } } ?></summary>
+									<?php foreach ($srv as $x): ?>
+										<div class="muted"><?= !empty($x['now']) ? '▶ ' : '' ?><?= h($x['name'] ?: '—') ?> · <?= h($x['type']) ?> · <?= h($x['host']) ?> · <?= !empty($x['delay']) ? (int)$x['delay'] . ' мс' : 'не отвечает' ?></div>
+									<?php endforeach; ?>
+								</details>
+								<button type="submit" name="action" value="sub_refresh:<?= h($s['name']) ?>" formnovalidate onclick="dirty = false" style="margin-top:6px">🔄 Обновить список серверов сейчас</button>
+							</div>
+						<?php endif; ?>
+					</div>
 				</div>
 				<div data-for="vpn">
 					<label class="field">VPN-интерфейс роутера</label>
@@ -552,13 +618,20 @@ panel_header($router['name']);
 		</div>
 	</form>
 
-	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'interface' => '', 'dr_enabled' => false, 'dr_type' => 'doh', 'dr_server' => '1.1.1.1', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames, $vpnIfaces); ?></template>
+	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'sub' => null, 'source' => 'key', 'sub_url' => '', 'sub_exclude' => 'Россия', 'interface' => '', 'dr_enabled' => false, 'dr_type' => 'doh', 'dr_server' => '1.1.1.1', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames, $vpnIfaces); ?></template>
 
 	<datalist id="vpn-ifaces"><?php foreach ($vpnIfaces as $v): ?><option value="<?= h($v) ?>"><?php endforeach; ?></datalist>
 
 	<script>
 		let next = <?= count($sections) + 1 ?>;
 		// Показать только поля выбранного типа секции (ключ — у прокси, интерфейс — у VPN и т.д.)
+		// Внутри «через прокси»: один ключ или подписка
+		function showSource(sel) {
+			const sec = sel.closest('[data-section]');
+			sec.querySelectorAll('[data-src]').forEach(el => {
+				el.style.display = el.dataset.src === sel.value ? '' : 'none';
+			});
+		}
 		function showType(sel) {
 			const sec = sel.closest('[data-section]');
 			sec.querySelectorAll('[data-for]').forEach(el => {
@@ -569,8 +642,10 @@ panel_header($router['name']);
 			const html = document.getElementById('tpl').innerHTML.replaceAll('[9999]', '[' + (next++) + ']');
 			document.getElementById('sections').insertAdjacentHTML('beforeend', html);
 			showType(document.getElementById('sections').lastElementChild.querySelector('select[name$="[type]"]'));
+			showSource(document.getElementById('sections').lastElementChild.querySelector('select[name$="[source]"]'));
 		}
 		document.querySelectorAll('#sections select[name$="[type]"]').forEach(showType);
+		document.querySelectorAll('#sections select[name$="[source]"]').forEach(showSource);
 		function moveSection(btn, dir) {
 			const el = btn.closest('[data-section]');
 			const sib = dir < 0 ? el.previousElementSibling : el.nextElementSibling;
