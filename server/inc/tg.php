@@ -115,14 +115,20 @@ function show($chat, ?int $messageId, array $screen): void
 	tg('sendMessage', $p);
 }
 
-// Уведомление: всегда попадает в ленту на сайте (outbox), а если подключён бот — ещё и в Telegram
+// Уведомление: всегда попадает в ленту на сайте (outbox); если настроено — ещё во ВКонтакте
+// и (если подключён бот) в Telegram
 function notify_admins(string $text, ?array $kb = null): void
 {
 	if (!cfg('bot_token')) {
 		q('INSERT INTO outbox (ts, chat_id, text) VALUES (?, ?, ?)', [time(), 'site', $text]);
-		return;
+	} else {
+		foreach (cfg('admin_ids', []) as $id) {
+			send($id, $text, $kb);
+		}
 	}
-	foreach (cfg('admin_ids', []) as $id) {
-		send($id, $text, $kb);
+	try {
+		vk_notify($text, notify_link($kb));
+	} catch (Throwable $e) {
+		error_log('vk_notify: ' . $e->getMessage());
 	}
 }

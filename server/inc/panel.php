@@ -99,7 +99,7 @@ function panel_header(string $title, bool $autoRefresh = false): void
 </head>
 <body>
 <header>
-	<span><b>🛰 Роутеры</b><?php if (panel_authed()): ?> &nbsp; <a href="index.php">Обзор</a><?php endif; ?></span>
+	<span><b>🛰 Роутеры</b><?php if (panel_authed()): ?> &nbsp; <a href="index.php">Обзор</a> &nbsp; <a href="settings.php">⚙️ Настройки</a><?php endif; ?></span>
 	<?php if (panel_authed()): ?><a href="index.php?logout">выйти</a><?php endif; ?>
 </header>
 <main>
