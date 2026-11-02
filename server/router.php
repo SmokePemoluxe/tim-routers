@@ -7,7 +7,7 @@ require __DIR__ . '/inc/panel.php';
 panel_start();
 panel_require();
 
-const MIN_AGENT = '1.3';
+const MIN_AGENT = '1.8';
 
 $rid = (int)($_GET['id'] ?? 0);
 $router = get_router($rid);
@@ -35,6 +35,10 @@ function sections_from_db(int $rid): array
 			'config' => $d['config'] ?? '',
 			'status' => section_line($s, $byName),
 			'detour' => (string)($d['detour'] ?? ''),
+			'interface' => (string)($d['interface'] ?? ''),
+			'dr_enabled' => !empty($d['dr_enabled']),
+			'dr_type' => (string)($d['dr_type'] ?? ''),
+			'dr_server' => (string)($d['dr_server'] ?? ''),
 			'cur_detour' => (string)($d['detour'] ?? ''),
 			'key' => '',
 			'domains' => implode("\n", $d['domains'] ?? []),
@@ -67,6 +71,10 @@ function sections_from_post(int $rid): array
 			'config' => $base['config'],
 			'status' => $base['status'],
 			'detour' => trim((string)($p['detour'] ?? '')),
+			'interface' => trim((string)($p['interface'] ?? '')),
+			'dr_enabled' => !empty($p['dr_enabled']),
+			'dr_type' => (string)($p['dr_type'] ?? 'doh'),
+			'dr_server' => trim((string)($p['dr_server'] ?? '')),
 			'cur_detour' => $base['cur_detour'],
 			'key' => trim((string)($p['key'] ?? '')),
 			'domains' => (string)($p['domains'] ?? ''),
@@ -109,7 +117,7 @@ function build_payload(array $sections, array $settings): array
 	// Через какие секции можно пускать: существующие (не новые и не удаляемые) секции «через прокси»
 	$targets = [];
 	foreach ($sections as $s) {
-		if ($s['orig'] !== '' && !$s['delete'] && $s['type'] === 'proxy') {
+		if ($s['orig'] !== '' && !$s['delete'] && in_array($s['type'], ['proxy', 'vpn'], true)) {
 			$targets[$s['name']] = $s['detour'];
 		}
 	}
@@ -146,8 +154,18 @@ function build_payload(array $sections, array $settings): array
 		}
 		$names[$s['name']] = true;
 
-		if (!in_array($s['type'], ['proxy', 'exclusion'], true)) {
+		if (!in_array($s['type'], ['proxy', 'vpn', 'exclusion', 'block'], true)) {
 			$errors[] = "{$s['name']}: выберите, куда направлять домены";
+		}
+		if ($s['type'] === 'vpn') {
+			if ($s['interface'] === '') {
+				$errors[] = "{$s['name']}: укажите VPN-интерфейс роутера (например wg0)";
+			} elseif (!preg_match('/^[A-Za-z0-9_.-]{1,15}$/', $s['interface'])) {
+				$errors[] = "{$s['name']}: «{$s['interface']}» — не похоже на имя интерфейса";
+			}
+			if ($s['dr_enabled'] && (!in_array($s['dr_type'], ['doh', 'dot', 'udp'], true) || !preg_match('#^[A-Za-z0-9.:/_-]{2,100}$#', $s['dr_server']))) {
+				$errors[] = "{$s['name']}: проверьте DNS для VPN (тип и сервер)";
+			}
 		}
 		if ($s['key'] !== '' && !valid_key($s['key'])) {
 			$errors[] = "{$s['name']}: ключ не похож на ссылку прокси (hy2://, vless://, ss://, trojan://…)";
@@ -207,6 +225,10 @@ function build_payload(array $sections, array $settings): array
 			'connection_type' => $s['type'],
 			'key' => $key,
 			'outbound' => $outbound,
+			'interface' => $s['type'] === 'vpn' ? $s['interface'] : '',
+			'dr_enabled' => $s['type'] === 'vpn' && $s['dr_enabled'],
+			'dr_type' => $s['dr_type'],
+			'dr_server' => $s['dr_server'],
 			'set_detour' => $setDetour,
 			'detour' => $detour,
 			'domains' => $domains,
@@ -325,17 +347,19 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !isset($_POST['action'])) {
 
 $proxyNames = [];
 foreach (sections_from_db($rid) as $s) {
-	if ($s['type'] === 'proxy') {
+	if (in_array($s['type'], ['proxy', 'vpn'], true)) {
 		$proxyNames[] = $s['name'];
 	}
 }
+// VPN-интерфейсы, которые агент нашёл на роутере (подсказки для поля «интерфейс»)
+$vpnIfaces = array_values(array_filter((array)($info['vpn_ifaces'] ?? []), fn($v) => is_string($v) && preg_match('/^[A-Za-z0-9_.-]{1,15}$/', $v)));
 
 $pending = rows("SELECT * FROM tasks WHERE router_id = ? AND type = 'apply_config' AND status IN ('queued', 'sent') ORDER BY id DESC LIMIT 1", [$rid]);
 $last = row("SELECT * FROM tasks WHERE router_id = ? AND type = 'apply_config' AND status IN ('done', 'failed') AND result != 'заменено более новой отправкой' ORDER BY id DESC LIMIT 1", [$rid]);
 
 // ---------- Вывод ----------
 
-function render_section(int $i, array $s, array $proxyNames): void
+function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = []): void
 {
 	$isNew = $s['orig'] === '';
 	$keyEditable = $isNew || in_array($s['config'], ['url', ''], true);
@@ -358,25 +382,45 @@ function render_section(int $i, array $s, array $proxyNames): void
 		<div class="grid">
 			<div>
 				<label class="field">Куда направлять</label>
-				<select name="sections[<?= $i ?>][type]">
+				<select name="sections[<?= $i ?>][type]" onchange="showType(this)">
 					<option value="proxy" <?= $s['type'] === 'proxy' ? 'selected' : '' ?>>🔐 Через прокси</option>
+					<option value="vpn" <?= $s['type'] === 'vpn' ? 'selected' : '' ?>>🛡 Через VPN (WireGuard, AmneziaWG, OpenVPN…)</option>
 					<option value="exclusion" <?= $s['type'] === 'exclusion' ? 'selected' : '' ?>>↪️ Мимо прокси (напрямую)</option>
+					<option value="block" <?= $s['type'] === 'block' ? 'selected' : '' ?>>⛔ Блокировать (не открывать)</option>
 				</select>
+				<div class="muted" data-for="block" style="margin-top:6px">Домены и подсети этой секции не будут открываться ни на одном устройстве в сети.</div>
+				<div class="muted" data-for="exclusion" style="margin-top:6px">Домены этой секции идут напрямую, даже если попадают в списки других секций.</div>
 			</div>
 			<div>
-				<label class="field">Ключ (ссылка)</label>
-				<?php if ($keyEditable): ?>
-					<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="<?= $isNew ? 'hy2://…' : 'оставьте пустым — ключ не изменится' ?>" autocomplete="off" spellcheck="false">
-				<?php else: ?>
-					<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="задан JSON (<?= h($s['config']) ?>) — вставьте ссылку, чтобы заменить" autocomplete="off" spellcheck="false">
-				<?php endif; ?>
-				<label class="field">Пустить через <span class="muted">(цепочка: эта секция ходит через другую)</span></label>
-				<select name="sections[<?= $i ?>][detour]">
-					<option value="">— напрямую в интернет —</option>
-					<?php foreach ($proxyNames as $n): if ($n === $s['name']) continue; ?>
-						<option value="<?= h($n) ?>" <?= $s['detour'] === $n ? 'selected' : '' ?>>через <?= h($n) ?></option>
-					<?php endforeach; ?>
-				</select>
+				<div data-for="proxy">
+					<label class="field">Ключ (ссылка)</label>
+					<?php if ($keyEditable): ?>
+						<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="<?= $isNew ? 'hy2://…' : 'оставьте пустым — ключ не изменится' ?>" autocomplete="off" spellcheck="false">
+					<?php else: ?>
+						<input type="text" name="sections[<?= $i ?>][key]" value="<?= h($s['key']) ?>" placeholder="задан как «<?= h($s['config']) ?>» — вставьте ссылку, чтобы заменить" autocomplete="off" spellcheck="false">
+					<?php endif; ?>
+					<label class="field">Пустить через <span class="muted">(цепочка: эта секция ходит через другую)</span></label>
+					<select name="sections[<?= $i ?>][detour]">
+						<option value="">— напрямую в интернет —</option>
+						<?php foreach ($proxyNames as $n): if ($n === $s['name']) continue; ?>
+							<option value="<?= h($n) ?>" <?= $s['detour'] === $n ? 'selected' : '' ?>>через <?= h($n) ?></option>
+						<?php endforeach; ?>
+					</select>
+				</div>
+				<div data-for="vpn">
+					<label class="field">VPN-интерфейс роутера</label>
+					<input type="text" name="sections[<?= $i ?>][interface]" value="<?= h($s['interface']) ?>" list="vpn-ifaces" placeholder="например wg0 или awg0" autocomplete="off" spellcheck="false">
+					<div class="muted">Интерфейс должен быть уже настроен на роутере (LuCI → Сеть → Интерфейсы).<?= $vpnIfaces ? ' Найдены: ' . h(implode(', ', $vpnIfaces)) . '.' : ' VPN-интерфейсов на роутере не найдено.' ?></div>
+					<label style="display:block;margin-top:8px"><input type="checkbox" name="sections[<?= $i ?>][dr_enabled]" value="1" <?= $s['dr_enabled'] ? 'checked' : '' ?>> Узнавать адреса доменов через этот VPN (свой DNS)</label>
+					<div class="row" style="margin-top:4px">
+						<select name="sections[<?= $i ?>][dr_type]" style="width:auto">
+							<?php foreach (['doh' => 'DoH', 'dot' => 'DoT', 'udp' => 'UDP'] as $v => $l): ?>
+								<option value="<?= $v ?>" <?= ($s['dr_type'] ?: 'doh') === $v ? 'selected' : '' ?>><?= $l ?></option>
+							<?php endforeach; ?>
+						</select>
+						<input type="text" name="sections[<?= $i ?>][dr_server]" value="<?= h($s['dr_server'] ?: '1.1.1.1') ?>" style="flex:1;min-width:120px">
+					</div>
+				</div>
 			</div>
 			<div>
 				<label class="field">Свои домены <span class="muted">(по одному в строке)</span></label>
@@ -490,7 +534,7 @@ panel_header($router['name']);
 			<h2>Секции <span class="muted">— порядок важен: если домен есть в двух секциях, сработает верхняя</span></h2>
 			<div id="sections">
 				<?php foreach ($sections as $i => $s) {
-					render_section($i, $s, $proxyNames);
+					render_section($i, $s, $proxyNames, $vpnIfaces);
 				} ?>
 			</div>
 			<button type="button" onclick="addSection()">➕ Добавить секцию</button>
@@ -503,14 +547,25 @@ panel_header($router['name']);
 		</div>
 	</form>
 
-	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames); ?></template>
+	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'interface' => '', 'dr_enabled' => false, 'dr_type' => 'doh', 'dr_server' => '1.1.1.1', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames, $vpnIfaces); ?></template>
+
+	<datalist id="vpn-ifaces"><?php foreach ($vpnIfaces as $v): ?><option value="<?= h($v) ?>"><?php endforeach; ?></datalist>
 
 	<script>
 		let next = <?= count($sections) + 1 ?>;
+		// Показать только поля выбранного типа секции (ключ — у прокси, интерфейс — у VPN и т.д.)
+		function showType(sel) {
+			const sec = sel.closest('[data-section]');
+			sec.querySelectorAll('[data-for]').forEach(el => {
+				el.style.display = el.dataset.for === sel.value ? '' : 'none';
+			});
+		}
 		function addSection() {
 			const html = document.getElementById('tpl').innerHTML.replaceAll('[9999]', '[' + (next++) + ']');
 			document.getElementById('sections').insertAdjacentHTML('beforeend', html);
+			showType(document.getElementById('sections').lastElementChild.querySelector('select[name$="[type]"]'));
 		}
+		document.querySelectorAll('#sections select[name$="[type]"]').forEach(showType);
 		function moveSection(btn, dir) {
 			const el = btn.closest('[data-section]');
 			const sib = dir < 0 ? el.previousElementSibling : el.nextElementSibling;

@@ -34,7 +34,7 @@
 # Отчёт:       inet-watchdog report > /tmp/report.txt
 # Настройки:   /etc/inet-watchdog.conf  (после правки: inet-watchdog restart)
 
-VERSION="3.4"
+VERSION="3.5"
 NAME="inet-watchdog"
 BIN="/usr/bin/$NAME"
 INIT="/etc/init.d/$NAME"
@@ -249,11 +249,17 @@ restart_dns() {
 # и у роутера пропадает интернет целиком. Перезапуск тут не поможет.
 podkop_unconfigured() {
 	for s in $(uci -q show podkop | sed -n 's/^podkop\.\([A-Za-z0-9_]*\)=section$/\1/p'); do
-		[ "$(uci -q get "podkop.$s.connection_type")" = "proxy" ] || continue
-		case "$(uci -q get "podkop.$s.proxy_config_type")" in
-			outbound) v=$(uci -q get "podkop.$s.outbound_json") ;;
-			urltest) v=$(uci -q get "podkop.$s.urltest_proxy_links") ;;
-			*) v=$(uci -q get "podkop.$s.proxy_string") ;;
+		case "$(uci -q get "podkop.$s.connection_type")" in
+			proxy)
+				case "$(uci -q get "podkop.$s.proxy_config_type")" in
+					outbound) v=$(uci -q get "podkop.$s.outbound_json") ;;
+					urltest) v=$(uci -q get "podkop.$s.urltest_proxy_links") ;;
+					selector) v=$(uci -q get "podkop.$s.selector_proxy_links") ;;
+					*) v=$(uci -q get "podkop.$s.proxy_string") ;;
+				esac
+				;;
+			vpn) v=$(uci -q get "podkop.$s.interface") ;;
+			*) continue ;;
 		esac
 		[ -n "$v" ] || { echo "$s"; return; }
 	done
@@ -262,7 +268,7 @@ podkop_unconfigured() {
 # Ненастроенный podkop ломает DNS — останавливаем его (DNS вернётся к обычному), пока не зададут ключ.
 # Агент запустит podkop сам, когда ключ придёт из панели.
 stop_unconfigured_podkop() {
-	log_history "podkop не настроен (в секции $1 нет ключа) и ломает DNS роутера — останавливаю podkop до настройки"
+	log_history "podkop не настроен (в секции $1 нет ключа или VPN-интерфейса) и ломает DNS роутера — останавливаю podkop до настройки"
 	/etc/init.d/podkop stop >/dev/null 2>&1
 }
 

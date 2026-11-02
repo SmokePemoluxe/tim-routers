@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="1.7"
+VERSION="1.8"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -176,7 +176,13 @@ section_json() {
 	detour=""
 	DELAY=""
 	DELAY_ERR=""
-	if [ "$ct" = "proxy" ] || [ "$ct" = "vpn" ]; then
+	vif=""
+	if [ "$ct" = "vpn" ]; then
+		vif=$(opt "$s" interface)
+		scheme=vpn
+		host=$vif
+		section_delay "$s"
+	elif [ "$ct" = "proxy" ]; then
 		case "$pc" in
 			url)
 				ps=$(opt "$s" proxy_string)
@@ -206,8 +212,10 @@ section_json() {
 		dynamic) subnets=$(opt "$s" user_subnets | tr ' ' '\n') ;;
 		*) subnets="" ;;
 	esac
-	printf '{"name":%s,"type":%s,"config":%s,"scheme":%s,"host":%s,"detour":%s,"delay":%s,"error":%s,"list_type":%s,"subnets":%s,"domains":%s,"community":%s,"remote":%s}' \
+	printf '{"name":%s,"type":%s,"config":%s,"scheme":%s,"host":%s,"interface":%s,"dr_enabled":%s,"dr_type":%s,"dr_server":%s,"detour":%s,"delay":%s,"error":%s,"list_type":%s,"subnets":%s,"domains":%s,"community":%s,"remote":%s}' \
 		"$(json_str "$s")" "$(json_str "$ct")" "$(json_str "$pc")" "$(json_str "$scheme")" "$(json_str "$host")" \
+		"$(json_str "$vif")" "$([ "$(opt "$s" domain_resolver_enabled)" = 1 ] && echo true || echo false)" \
+		"$(json_str "$(opt "$s" domain_resolver_dns_type)")" "$(json_str "$(opt "$s" domain_resolver_dns_server)")" \
 		"$(json_str "$detour")" "$(json_num "$DELAY")" "$(json_str "$DELAY_ERR")" "$(json_str "$lt")" \
 		"$(printf '%s\n' "$subnets" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | json_list)" \
 		"$(printf '%s\n' "$domains" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | json_list)" \
@@ -238,6 +246,18 @@ watchdog_json() {
 	fi
 }
 
+# VPN-интерфейсы роутера (WireGuard, AmneziaWG, OpenVPN, tun…) — для выбора на сайте
+vpn_ifaces() {
+	for d in /sys/class/net/*; do
+		n=${d##*/}
+		case "$n" in
+			wg*|awg*|tun*|tap*|ovpn*|vpn*|nordlynx*|zt*) echo "$n" ;;
+			lo|br-*|eth*|lan*|wan*|phy*|wlan*|ifb*|gre*|ip6*|sit*|teql*|erspan*|bond*) ;;
+			*) [ "$(cat "$d/type" 2>/dev/null)" = "65534" ] && echo "$n" ;;
+		esac
+	done
+}
+
 # MAC порта WAN (по нему роутер узнаётся, даже если его переустановили)
 wan_mac() {
 	dev=$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)
@@ -250,7 +270,7 @@ info_json() {
 	board=$(ubus call system board 2>/dev/null)
 	sb=false
 	pidof sing-box >/dev/null && sb=true
-	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s},"watchdog":' \
+	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s},"watchdog":' \
 		"$(json_str "$VERSION")" \
 		"$(json_str "$(jsonfilter -s "$board" -e '@.model' 2>/dev/null)")" \
 		"$(json_str "$DISTRIB_RELEASE")" \
@@ -262,6 +282,7 @@ info_json() {
 		"$(json_str "$(uci -q get network.lan.ipaddr | cut -d/ -f1)")" \
 		"$(json_str "$(cat /sys/class/net/br-lan/address 2>/dev/null)")" \
 		"$(json_str "$(wan_mac)")" \
+		"$(vpn_ifaces | json_list)" \
 		"$sb" \
 		"$(json_str "$(uci -q get podkop.settings.dns_type)")" \
 		"$(json_str "$(uci -q get podkop.settings.dns_server)")" \
@@ -647,6 +668,14 @@ $d"
 	fi
 }
 
+# Имя сетевого интерфейса Linux (wg0, awg0, tun0, ovpn …): до 15 символов
+valid_iface() {
+	case "$1" in
+		''|*[!A-Za-z0-9_.-]*) return 1 ;;
+	esac
+	[ ${#1} -le 15 ]
+}
+
 valid_subnet() {
 	case "$1" in
 		''|*[!0-9./]*) return 1 ;;
@@ -824,6 +853,12 @@ t_apply_config() {
 			ob=""
 		fi
 
+		vif=$(sec_field interface)
+		if [ -n "$vif" ] && ! valid_iface "$vif"; then
+			errors="$errors; $name: недопустимое имя VPN-интерфейса"
+			vif=""
+		fi
+
 		if ! is_section "$name"; then
 			case "$ct" in
 				proxy)
@@ -833,7 +868,14 @@ t_apply_config() {
 						continue
 					fi
 					;;
-				exclusion) ;;
+				vpn)
+					if [ -z "$vif" ]; then
+						errors="$errors; $name: для секции через VPN нужен интерфейс"
+						SEC_IDX=$((SEC_IDX + 1))
+						continue
+					fi
+					;;
+				exclusion|block) ;;
 				*)
 					errors="$errors; $name: неизвестный тип «$ct»"
 					SEC_IDX=$((SEC_IDX + 1))
@@ -858,7 +900,14 @@ t_apply_config() {
 			cur_ct=$(opt "$name" connection_type)
 			if [ -n "$ct" ] && [ "$ct" != "$cur_ct" ]; then
 				case "$ct" in
-					exclusion) uci set "podkop.$name.connection_type=exclusion" ;;
+					exclusion|block) uci set "podkop.$name.connection_type=$ct" ;;
+					vpn)
+						if [ -n "$vif" ] || [ -n "$(opt "$name" interface)" ]; then
+							uci set "podkop.$name.connection_type=vpn"
+						else
+							errors="$errors; $name: чтобы пустить через VPN, нужен интерфейс"
+						fi
+						;;
 					proxy)
 						if [ -n "$key$ob" ] || [ -n "$(opt "$name" proxy_string)$(opt "$name" outbound_json)" ]; then
 							uci set "podkop.$name.connection_type=proxy"
@@ -886,6 +935,22 @@ t_apply_config() {
 				else
 					errors="$errors; $name: чтобы пустить через другую секцию, нужен ключ"
 				fi
+			fi
+		fi
+
+		# VPN: интерфейс и (по желанию) отдельный DNS для доменов этой секции
+		if [ "$(opt "$name" connection_type)" = "vpn" ]; then
+			[ -n "$vif" ] && uci set "podkop.$name.interface=$vif"
+			if [ "$(sec_field dr_enabled)" = "true" ]; then
+				drt=$(sec_field dr_type)
+				drs=$(sec_field dr_server)
+				case "$drt" in doh|dot|udp) ;; *) drt=doh ;; esac
+				case "$drs" in ''|*[!A-Za-z0-9.:/_-]*) drs=1.1.1.1 ;; esac
+				uci set "podkop.$name.domain_resolver_enabled=1"
+				uci set "podkop.$name.domain_resolver_dns_type=$drt"
+				uci set "podkop.$name.domain_resolver_dns_server=$drs"
+			else
+				uci set "podkop.$name.domain_resolver_enabled=0"
 			fi
 		fi
 

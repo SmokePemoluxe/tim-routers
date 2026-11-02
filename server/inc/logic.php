@@ -105,7 +105,7 @@ function router_icon(array $r): string
 function section_icon(array $s): string
 {
 	if ($s['ok'] === null) {
-		return '⚪';
+		return (sdata($s)['type'] ?? '') === 'block' ? '⛔' : '⚪';
 	}
 	return (int)$s['ok'] ? '🟢' : '🔴';
 }
@@ -125,6 +125,12 @@ function section_kind(array $d): string
 	if ($type === 'exclusion') {
 		return 'мимо прокси';
 	}
+	if ($type === 'block') {
+		return 'блокировка (домены не открываются)';
+	}
+	if ($type === 'vpn') {
+		return 'через VPN' . (!empty($d['interface']) ? ' (' . $d['interface'] . ')' : '');
+	}
 	if ($type === 'proxy') {
 		$cfgType = ['url' => 'ссылка', 'outbound' => 'outbound JSON', 'urltest' => 'несколько ссылок'][$d['config'] ?? ''] ?? ($d['config'] ?? '');
 		return 'через прокси (' . $cfgType . ')';
@@ -139,6 +145,9 @@ function section_line(array $s, array $byName = []): string
 	$t = section_icon($s) . ' <b>' . h($s['name']) . '</b> — ';
 	if (($d['type'] ?? '') === 'exclusion') {
 		return $t . 'мимо прокси';
+	}
+	if (($d['type'] ?? '') === 'block') {
+		return $t . 'блокирует домены';
 	}
 	$t .= h($d['scheme'] ?? '?');
 	if (!empty($d['host'])) {
