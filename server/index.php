@@ -1,6 +1,6 @@
 <?php
 // Веб-панель: обзор роутеров, подтверждение новых, уведомления, события.
-// Настройка конкретного роутера — router.php.
+// Настройка конкретного роутера — router.php, настройки панели — settings.php.
 
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/panel.php';
@@ -8,16 +8,39 @@ require __DIR__ . '/inc/panel.php';
 panel_start();
 $notice = '';
 
-if (isset($_POST['password'])) {
-	if (cfg('panel_password') && hash_equals((string)cfg('panel_password'), (string)$_POST['password'])) {
-		session_regenerate_id(true);
-		$_SESSION['ok'] = true;
-		$_SESSION['csrf'] = bin2hex(random_bytes(16));
-		header('Location: index.php');
-		exit;
+// ---------- Вход: пароль → (если нужно) код двухфакторки ----------
+
+if (!panel_authed() && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['password']) || isset($_POST['code']))) {
+	if ($left = login_locked()) {
+		$notice = 'Слишком много неудачных попыток. Попробуйте через ' . ceil($left / 60) . ' мин.';
+	} elseif (isset($_POST['password'])) {
+		if (cfg('panel_password') && hash_equals((string)cfg('panel_password'), (string)$_POST['password'])) {
+			$dev = device_id();
+			if (totp_settings()['enabled'] && !device_trusted($dev)) {
+				$_SESSION['pw_ok'] = time();
+			} else {
+				complete_login(false);
+				header('Location: index.php');
+				exit;
+			}
+		} else {
+			sleep(1);
+			login_failed('неверный пароль');
+			$notice = 'Неверный пароль';
+		}
+	} elseif (isset($_POST['code']) && !empty($_SESSION['pw_ok']) && time() - (int)$_SESSION['pw_ok'] < 300) {
+		if (totp_check((string)$_POST['code'])) {
+			complete_login(true);
+			header('Location: index.php');
+			exit;
+		}
+		sleep(1);
+		login_failed('неверный код двухфакторки');
+		$notice = 'Неверный код';
+	} else {
+		unset($_SESSION['pw_ok']);
+		$notice = 'Время на ввод кода вышло — введите пароль заново.';
 	}
-	sleep(2);
-	$notice = 'Неверный пароль';
 }
 if (isset($_GET['logout'])) {
 	$_SESSION = [];
@@ -38,15 +61,25 @@ function tg_html(string $text): string
 }
 
 if (!panel_authed()) {
+	$step2 = !empty($_SESSION['pw_ok']) && time() - (int)$_SESSION['pw_ok'] < 300;
 	panel_header('Вход');
 	?>
 	<div class="card login">
 		<h2>Панель роутеров</h2>
 		<?php if ($notice): ?><div class="notice err"><?= h($notice) ?></div><?php endif; ?>
-		<form method="post">
-			<input type="password" name="password" placeholder="Пароль" autofocus>
-			<p><button type="submit" class="primary" style="width:100%">Войти</button></p>
-		</form>
+		<?php if ($step2): ?>
+			<form method="post">
+				<p>Введите код из Google Authenticator (или резервный код):</p>
+				<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" autofocus style="font-size:20px;letter-spacing:4px;text-align:center">
+				<p><button type="submit" class="primary" style="width:100%">Подтвердить</button></p>
+				<p class="muted">На этом устройстве код не будет спрашиваться <?= TRUST_DAYS ?> дней.</p>
+			</form>
+		<?php else: ?>
+			<form method="post">
+				<input type="password" name="password" placeholder="Пароль" autofocus>
+				<p><button type="submit" class="primary" style="width:100%">Войти</button></p>
+			</form>
+		<?php endif; ?>
 	</div>
 	<?php
 	panel_footer();
@@ -67,6 +100,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 		} else {
 			q("UPDATE routers SET name = ?, status = 'active' WHERE id = ?", [$name, $rid]);
 			event($rid, 'Принят в систему как «' . $name . '»');
+			audit('принят новый роутер «' . $name . '» (#' . $rid . ', IP ' . $r['ip'] . ')');
 			$_SESSION['flash'] = 'Роутер «' . $name . '» принят. Полные данные появятся после его следующего выхода на связь (до 2 минут).';
 			header('Location: index.php');
 			exit;
@@ -78,9 +112,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 			foreach ($ids as $id) {
 				queue_task((int)$id, 'update', ['ref' => $ref]);
 			}
+			audit('обновление скриптов до «' . $ref . '» на всех роутерах (' . count($ids) . ')');
 			$_SESSION['flash'] = 'Обновление скриптов до «' . $ref . '» отправлено на роутеров: ' . count($ids) . '. Каждый применит его при следующем выходе на связь (до 2 минут).';
 		}
 		header('Location: index.php');
+		exit;
+	} elseif ($_POST['action'] === 'invite') {
+		$_SESSION['invite'] = ['code' => invite_create(), 'ts' => time()];
+		audit('создан код приглашения для нового роутера (действует ' . (INVITE_TTL / 3600) . ' ч, один раз)');
+		header('Location: index.php#install');
 		exit;
 	} elseif ($_POST['action'] === 'podkop_all') {
 		$n = 0;
@@ -90,6 +130,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 				$n++;
 			}
 		}
+		if ($n) {
+			audit("обновление podkop на роутерах: $n");
+		}
 		$_SESSION['flash'] = $n ? "Обновление podkop отправлено на роутеров: $n (только где версия устарела). Займёт несколько минут; результат — в «Задачах» и уведомлениях."
 			: 'Устаревшего podkop нет ни на одном роутере.';
 		header('Location: index.php');
@@ -97,6 +140,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 	} elseif ($r && $r['status'] === 'pending' && $_POST['action'] === 'reject') {
 		q("UPDATE routers SET status = 'rejected' WHERE id = ?", [$rid]);
 		event($rid, 'Отклонён');
+		audit('отклонён роутер «' . $r['name'] . '» (#' . $rid . ')');
 		$_SESSION['flash'] = 'Роутер отклонён.';
 		header('Location: index.php');
 		exit;
@@ -304,12 +348,17 @@ panel_header('Обзор');
 	<div id="b-alerts"><?= $blocks['alerts'] ?></div>
 	<div id="b-tasks"><?= $blocks['tasks'] ?></div>
 
-	<details class="card">
+	<?php $inv = $_SESSION['invite'] ?? null; $invFresh = $inv && time() - $inv['ts'] < INVITE_TTL; ?>
+	<details class="card" id="install" <?= $invFresh && time() - $inv['ts'] < 600 ? 'open' : '' ?>>
 		<summary><h2 style="display:inline">➕ Как подключить роутер</h2></summary>
 		<p>Нужно: роутер с OpenWrt и интернетом. podkop ставить заранее не обязательно — установщик поставит его сам и сразу выставит DNS через DoH 1.1.1.1.</p>
 		<p><b>1.</b> Зайти на роутер по SSH: в PowerShell <code>ssh root@192.168.1.1</code> (адрес роутера может отличаться).</p>
-		<p><b>2.</b> Вставить одну команду и нажать Enter:</p>
-		<pre class="cmd"><?= h(install_command()) ?></pre>
+		<p><b>2.</b> Вставить одну команду и нажать Enter. В команде — <b>одноразовый код приглашения</b>: без него сервер не примет новый роутер. Код действует <?= INVITE_TTL / 3600 ?> ч и подходит для одного роутера.</p>
+		<?php if ($invFresh): ?>
+			<pre class="cmd"><?= h(install_command($inv['code'])) ?></pre>
+			<p class="muted">Код создан <?= ago($inv['ts']) ?>. Для следующего роутера получите новый.</p>
+		<?php endif; ?>
+		<form method="post"><?= csrf_field() ?><button name="action" value="invite"><?= $invFresh ? '🔄 Новый код приглашения' : '🎟 Получить команду с кодом приглашения' ?></button></form>
 		<p><b>3.</b> Через 1–3 минуты роутер появится вверху этой страницы в «Ждут подтверждения» — дайте ему имя и примите.</p>
 		<p class="muted">Команда содержит адрес вашего сервера — его нет ни в скриптах, ни на GitHub. Передавайте её только тем, кому доверяете.
 			Если podkop ставить не нужно — добавьте в конец <code>--no-podkop</code>.</p>

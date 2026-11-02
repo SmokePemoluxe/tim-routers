@@ -22,4 +22,5 @@ require __DIR__ . '/tg.php';
 require __DIR__ . '/logic.php';
 require __DIR__ . '/links.php';
 require __DIR__ . '/vk.php';
+require __DIR__ . '/security.php';
 require __DIR__ . '/bot.php';

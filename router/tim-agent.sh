@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="1.8"
+VERSION="1.9"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -25,6 +25,7 @@ INIT="/etc/init.d/$NAME"
 CONF_DIR="/etc/$NAME"
 CONF="$CONF_DIR/config"
 RESULTS="$CONF_DIR/results"
+EVENTS="$CONF_DIR/events"
 RUN_DIR="/tmp/$NAME"
 TEST_URL="https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
 
@@ -47,7 +48,7 @@ load_conf() {
 
 save_conf() {
 	mkdir -p "$CONF_DIR"
-	(umask 077; printf 'SERVER="%s"\nTOKEN="%s"\n' "$SERVER" "$TOKEN" > "$CONF")
+	(umask 077; printf 'SERVER="%s"\nTOKEN="%s"\nINVITE="%s"\n' "$SERVER" "$TOKEN" "$INVITE" > "$CONF")
 }
 
 # ---------- JSON ----------
@@ -308,12 +309,108 @@ results_json() {
 	fi
 }
 
+# ---------- Наблюдение за роутером ----------
+# Изменения настроек НЕ через панель (кто-то зашёл в LuCI/SSH и поменял) и входы на роутер.
+# Сравниваем «снимки» с прошлой проверкой; секреты (ключи, пароли Wi-Fi) не отправляем —
+# вместо них короткий отпечаток, по которому видно только сам факт изменения.
+
+WATCH_DIR="$CONF_DIR/watch"
+WATCH_LIST="podkop firewall network wireless dhcp system dropbear uhttpd ssh_keys root_password crontab packages"
+
+hide_secrets() {
+	while IFS= read -r line; do
+		case "$line" in
+			*://*|*.key=*|*private_key=*|*preshared_key=*|*.password=*|*outbound_json=*|*proxy_string=*|*_links=*|*.auth_secret=*)
+				printf '%s=[скрыто #%s]\n' "${line%%=*}" "$(printf '%s' "${line#*=}" | md5sum | cut -c1-6)"
+				;;
+			*) printf '%s\n' "$line" ;;
+		esac
+	done
+}
+
+watch_dump() {
+	case "$1" in
+		# podkop и сторож сами меняют служебные отметки при каждом перезапуске — их не считаем
+		podkop) uci -q show podkop | grep -v '\.shutdown_correctly=' | hide_secrets ;;
+		dhcp) uci -q show dhcp | grep -vE '^dhcp\.@dnsmasq\[[0-9]+\]\.(server|noresolv|cachesize|podkop_[a-z_]+|doh_[a-z_]+)=' ;;
+		firewall|network|wireless|system|dropbear|uhttpd) uci -q show "$1" | hide_secrets ;;
+		ssh_keys) awk '{ print $1, $NF }' /etc/dropbear/authorized_keys 2>/dev/null ;;
+		root_password) echo "отпечаток пароля: $(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2 | md5sum | cut -c1-8)" ;;
+		crontab) grep -v 'podkop' /etc/crontabs/root 2>/dev/null ;;
+		packages) { opkg list-installed 2>/dev/null || apk list -I 2>/dev/null; } | awk '{ print $1 }' | sort ;;
+	esac
+}
+
+add_event() { # JSON-строка события
+	mkdir -p "$CONF_DIR"
+	echo "$1" >> "$EVENTS"
+}
+
+# $1: report — сообщить об изменениях; silent — только запомнить (после своих же задач)
+watch_check() {
+	mkdir -p "$WATCH_DIR" "$RUN_DIR"
+	for w in $WATCH_LIST; do
+		watch_dump "$w" > "$RUN_DIR/w.now" 2>/dev/null
+		last="$WATCH_DIR/$w"
+		if [ ! -f "$last" ]; then
+			cp "$RUN_DIR/w.now" "$last"
+			continue
+		fi
+		[ "$(md5sum < "$RUN_DIR/w.now")" = "$(md5sum < "$last")" ] && continue
+		if [ "$1" = "report" ]; then
+			add_event "$(printf '{"type":"config","file":%s,"added":%s,"removed":%s}' "$(json_str "$w")" \
+				"$(grep -vxFf "$last" "$RUN_DIR/w.now" | head -n 12 | json_list)" \
+				"$(grep -vxFf "$RUN_DIR/w.now" "$last" | head -n 12 | json_list)")"
+			log "изменено не через панель: $w"
+		fi
+		cp "$RUN_DIR/w.now" "$last"
+	done
+}
+
+# Входы в LuCI, по SSH и в веб-терминал — из системного журнала
+login_check() {
+	seen="$RUN_DIR/logins.seen"
+	now="$RUN_DIR/logins.now"
+	logread 2>/dev/null | grep -E 'luci: (accepted|failed) login|auth succeeded for|Bad password attempt|login\[[0-9]+\]: (root login|invalid password)' > "$now"
+	if [ ! -f "$seen" ] && [ "$(cut -d. -f1 /proc/uptime)" -gt 900 ]; then
+		# Агент запущен на давно работающем роутере — старые входы уже не новость
+		cp "$now" "$seen"
+		return
+	fi
+	touch "$seen"
+	grep -vxFf "$seen" "$now" | tail -n 20 | while IFS= read -r line; do
+		via=""; ok=false; key=false; user=""; ip=""
+		case "$line" in
+			*"luci: accepted login"*) via=luci; ok=true ;;
+			*"luci: failed login"*) via=luci ;;
+			*"Pubkey auth succeeded"*) via=ssh; ok=true; key=true ;;
+			*"auth succeeded"*) via=ssh; ok=true ;;
+			*"Bad password attempt"*) via=ssh ;;
+			*"root login on"*) via=terminal; ok=true; user=root ;;
+			*"invalid password"*) via=terminal ;;
+		esac
+		[ -n "$via" ] || continue
+		[ -n "$user" ] || user=$(printf '%s' "$line" | sed -nE "s/.* for '?([A-Za-z0-9_.-]+)'? .*/\1/p")
+		ip=$(printf '%s' "$line" | sed -nE 's/.* from ([0-9a-fA-F.:]+[0-9a-fA-F]).*/\1/p' | sed -E 's/:[0-9]+$//')
+		add_event "$(printf '{"type":"login","via":"%s","ok":%s,"key":%s,"user":%s,"ip":%s}' "$via" "$ok" "$key" "$(json_str "$user")" "$(json_str "$ip")")"
+	done
+	cp "$now" "$seen"
+}
+
+events_json() {
+	if [ -s "$EVENTS.sending" ]; then
+		awk 'BEGIN { printf "[" } { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { printf "]" }' "$EVENTS.sending"
+	else
+		printf '[]'
+	fi
+}
+
 # ---------- Обмен с сервером ----------
 
 register() {
 	mkdir -p "$RUN_DIR"
 	{
-		printf '{"info":'
+		printf '{"invite":%s,"info":' "$(json_str "$INVITE")"
 		info_json
 		printf '}'
 	} > "$RUN_DIR/register.json"
@@ -321,11 +418,16 @@ register() {
 	t=$(jsonfilter -s "$resp" -e '@.token' 2>/dev/null)
 	case "$t" in
 		''|*[!0-9a-f]*)
-			log "регистрация не удалась: ${resp:-сервер недоступен}"
+			if [ "$(jsonfilter -s "$resp" -e '@.error' 2>/dev/null)" = "invite_required" ]; then
+				log "сервер не принял роутер: нужен действующий код приглашения — получите команду установки в панели и запустите её заново"
+			else
+				log "регистрация не удалась: ${resp:-сервер недоступен}"
+			fi
 			return 1
 			;;
 	esac
 	TOKEN=$t
+	INVITE=""
 	save_conf
 	log "зарегистрирован на $SERVER — подтвердите роутер в панели («Ждут подтверждения»)"
 }
@@ -335,9 +437,15 @@ sync_once() {
 		register || return 1
 	fi
 	mkdir -p "$RUN_DIR"
+	watch_check report
+	login_check
 	if [ -s "$RESULTS" ]; then
 		cat "$RESULTS" >> "$RESULTS.sending"
 		rm -f "$RESULTS"
+	fi
+	if [ -s "$EVENTS" ]; then
+		cat "$EVENTS" >> "$EVENTS.sending"
+		rm -f "$EVENTS"
 	fi
 	body="$RUN_DIR/sync.json"
 	{
@@ -347,6 +455,8 @@ sync_once() {
 		sections_json
 		printf ',"results":'
 		results_json
+		printf ',"events":'
+		events_json
 		printf '}'
 	} > "$body"
 
@@ -366,7 +476,7 @@ sync_once() {
 		log "непонятный ответ сервера: $(printf '%s' "$resp" | head -c 200)"
 		return 1
 	fi
-	rm -f "$RESULTS.sending"
+	rm -f "$RESULTS.sending" "$EVENTS.sending"
 	date '+%Y-%m-%d %H:%M:%S' > "$RUN_DIR/last_sync"
 	echo "$STATUS" > "$RUN_DIR/status"
 
@@ -410,6 +520,8 @@ run_tasks() {
 		TASK_IDX=$((TASK_IDX + 1))
 	done
 	[ "$NEED_RESTART" = 1 ] && podkop_apply
+	# Изменения, сделанные по задачам из панели, — не «чужие»: только запоминаем
+	watch_check silent
 	# Устройства могли запомнить «прямые» адреса доменов, которые теперь идут через прокси, —
 	# переподключаем их (это делает сторож, один раз после всех изменений)
 	if [ "$PODKOP_CHANGED" = 1 ]; then
@@ -1200,6 +1312,8 @@ do_install() {
 
 	load_conf
 	[ -n "$1" ] && SERVER=${1%/}
+	[ -n "$2" ] && INVITE=$2
+	case "$INVITE" in *[!a-f0-9]*) echo "Недопустимый код приглашения"; exit 1 ;; esac
 	if [ -z "$SERVER" ]; then
 		echo "Укажите адрес сервера: sh $0 install https://адрес-сервера (готовая команда — в панели: «Как подключить роутер»)"
 		exit 1
@@ -1253,7 +1367,7 @@ do_status() {
 }
 
 case "$1" in
-	install)       do_install "$2" ;;
+	install)       do_install "$2" "$3" ;;
 	install-files) install_files ;;
 	uninstall)     do_uninstall ;;
 	run)           run ;;

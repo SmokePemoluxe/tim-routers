@@ -3,7 +3,21 @@
 
 function panel_start(): void
 {
+	// Защитные заголовки: панель нельзя встроить в чужой сайт, браузер не угадывает типы файлов
+	header('X-Frame-Options: DENY');
+	header("Content-Security-Policy: frame-ancestors 'none'");
+	header('X-Content-Type-Options: nosniff');
+	header('Referrer-Policy: same-origin');
+
+	// Сессии — 30 дней, в своей закрытой папке (на общем хостинге стандартные живут ~24 мин)
+	$dir = data_dir() . '/sessions';
+	if (!is_dir($dir)) {
+		mkdir($dir, 0700, true);
+	}
+	session_save_path($dir);
+	ini_set('session.gc_maxlifetime', (string)(30 * 86400));
 	session_set_cookie_params([
+		'lifetime' => 30 * 86400,
 		'httponly' => true,
 		'samesite' => 'Lax',
 		'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',

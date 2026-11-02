@@ -8,12 +8,14 @@
 #   --no-podkop      не ставить podkop, даже если его нет
 #   --update-podkop  обновить уже установленный podkop официальным установщиком
 #   --ref ВЕРСИЯ     ветка или тег на GitHub (по умолчанию main)
+#   --code КОД       одноразовый код приглашения из панели (нужен для нового роутера)
 
 REPO="SmokePemoluxe/tim-routers"
 REF="main"
 SERVER=""
 WITH_PODKOP=1
 UPDATE_PODKOP=0
+CODE=""
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
@@ -24,6 +26,7 @@ while [ $# -gt 0 ]; do
 		--no-podkop) WITH_PODKOP=0 ;;
 		--update-podkop) UPDATE_PODKOP=1 ;;
 		--ref) shift; REF=$1 ;;
+		--code) shift; CODE=$1 ;;
 		http://*|https://*) SERVER=${1%/} ;;
 		*) die "непонятный параметр: $1" ;;
 	esac
@@ -31,6 +34,9 @@ while [ $# -gt 0 ]; do
 done
 case "$REF" in
 	''|*[!A-Za-z0-9._-]*) die "недопустимая версия: $REF" ;;
+esac
+case "$CODE" in
+	*[!a-f0-9]*) die "недопустимый код приглашения: $CODE" ;;
 esac
 RAW="https://raw.githubusercontent.com/$REPO/$REF/router"
 
@@ -155,7 +161,10 @@ echo "OK"
 say "4/4 Устанавливаю сторожа интернета и агента"
 sh "$d/inet-watchdog.sh" install || die "сторож не установился"
 echo
-sh "$d/tim-agent.sh" install "$SERVER" || die "агент не установился"
+if [ -z "$CODE" ] && ! grep -qs "^TOKEN=\"[0-9a-f]" /etc/tim-agent/config; then
+	echo "Внимание: команда без кода приглашения — сервер не примет новый роутер. Возьмите команду с кодом в панели."
+fi
+sh "$d/tim-agent.sh" install "$SERVER" "$CODE" || die "агент не установился"
 rm -rf "$d" /tmp/tr-install.sh
 
 say "Готово!"

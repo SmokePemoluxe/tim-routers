@@ -275,6 +275,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 				if ($name !== '') {
 					q('UPDATE routers SET name = ? WHERE id = ?', [$name, $rid]);
 					event($rid, 'Переименован в «' . $name . '»');
+					audit('роутер «' . $router['name'] . '» переименован в «' . $name . '»');
 					$_SESSION['flash'] = ['ok', 'Имя сохранено.'];
 				}
 				break;
@@ -286,11 +287,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 				$ref = trim((string)($_POST['ref'] ?? ''));
 				if (preg_match('/^[A-Za-z0-9._-]{1,40}$/', $ref)) {
 					queue_task($rid, 'update', ['ref' => $ref]);
+					audit('обновление скриптов до «' . $ref . '» на роутере «' . $router['name'] . '»');
 					$_SESSION['flash'] = ['ok', "Обновление до «{$ref}» отправлено. Роутер скачает скрипты с GitHub и перезапустит их."];
 				}
 				break;
 			case 'update_podkop':
 				queue_task($rid, 'update_podkop');
+				audit('обновление podkop на роутере «' . $router['name'] . '»');
 				$_SESSION['flash'] = ['ok', 'Обновление podkop отправлено. Роутер скачает официальный установщик podkop, обновит, очистит кэш LuCI и переподключит устройства — это займёт несколько минут.'];
 				break;
 			case 'delete':
@@ -298,6 +301,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 				q('DELETE FROM sections WHERE router_id = ?', [$rid]);
 				q("DELETE FROM tasks WHERE router_id = ? AND status IN ('queued', 'sent')", [$rid]);
 				event($rid, 'Роутер удалён из системы');
+				audit('роутер «' . $router['name'] . '» удалён из системы');
 				$_SESSION['flash'] = 'Роутер «' . $router['name'] . '» удалён из системы.';
 				header('Location: index.php');
 				exit;
@@ -338,6 +342,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !isset($_POST['action'])) {
 			q("UPDATE tasks SET status = 'failed', done_at = ?, result = 'заменено более новой отправкой', payload = '{}' WHERE router_id = ? AND type = 'apply_config' AND status = 'queued'", [time(), $rid]);
 			queue_task($rid, 'apply_config', $payload);
 			event($rid, 'Настройки отправлены с сайта');
+			audit('отправлены настройки podkop на роутер «' . $router['name'] . '»: ' . task_label('apply_config', $payload));
 			$_SESSION['flash'] = ['ok', 'Отправлено. Роутер заберёт настройки при следующем выходе на связь (до 2 минут), применит, проверит ключи и переподключит устройства. Результат появится здесь и в Telegram.'];
 			header('Location: router.php?id=' . $rid);
 			exit;

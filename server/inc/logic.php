@@ -16,10 +16,10 @@ const KEY_SCHEMES = 'hy2|hysteria2|vless|vmess|ss|trojan|tuic|socks4|socks5|anyt
 const GITHUB_REPO = 'SmokePemoluxe/tim-routers';
 
 // Команда установки на новый роутер — с адресом этого сервера
-function install_command(): string
+function install_command(string $invite = ''): string
 {
 	return 'wget -O /tmp/tr-install.sh https://raw.githubusercontent.com/' . GITHUB_REPO . '/main/router/install.sh && sh /tmp/tr-install.sh '
-		. rtrim((string)cfg('base_url'), '/');
+		. rtrim((string)cfg('base_url'), '/') . ($invite !== '' ? ' --code ' . $invite : '');
 }
 
 // ---------- Форматирование ----------
@@ -398,6 +398,18 @@ function api_register(array $in): array
 		return ['error' => 'too_many_pending'];
 	}
 	$info = clean_info($in['info'] ?? null);
+
+	// Без действующего кода приглашения (из панели) новый роутер не принимаем
+	if (!invite_use((string)($in['invite'] ?? ''), 0)) {
+		event(null, 'Отклонена регистрация без кода приглашения: ' . mb_substr((string)($info['model'] ?? '?'), 0, 40) . ', IP ' . client_ip());
+		if (time() - (int)kv_get('invite_reject_notified', 0) > 3600) {
+			kv_set('invite_reject_notified', time());
+			notify_admins('🚫 Роутер пытался зарегистрироваться без кода приглашения (IP ' . h(client_ip()) . ', ' . h((string)($info['model'] ?? '?')) . "). Если это ваш — получите команду с кодом в панели. Следующие такие попытки — только в журнале событий, не чаще раза в час.");
+		}
+		http_response_code(403);
+		return ['error' => 'invite_required'];
+	}
+
 	$token = bin2hex(random_bytes(24));
 	$name = mb_substr(trim((string)($info['hostname'] ?? '')), 0, 40) ?: 'Новый роутер';
 	q('INSERT INTO routers (token_hash, name, status, created_at, last_seen, ip, info) VALUES (?, ?, ?, ?, ?, ?, ?)', [
@@ -491,6 +503,8 @@ function api_sync(array $r, array $in): array
 		}
 	}
 
+	router_events($r, (array)($in['events'] ?? []));
+
 	// Задачи, которые роутер взял, но не ответил за 15 минут, — повторяем (до 3 раз)
 	foreach (rows("SELECT * FROM tasks WHERE router_id = ? AND status = 'sent' AND sent_at < ? AND attempts >= 3", [$rid, $now - 900]) as $t) {
 		finish_task($r, $t, false, 'роутер трижды взял задачу, но не ответил');
@@ -502,6 +516,64 @@ function api_sync(array $r, array $in): array
 	}
 
 	return ['status' => 'active', 'interval' => (int)cfg('sync_interval', 120), 'tasks' => $out];
+}
+
+function watch_label(string $file): string
+{
+	return [
+		'podkop' => 'podkop', 'firewall' => 'брандмауэр', 'network' => 'сеть и интерфейсы', 'wireless' => 'Wi-Fi',
+		'dhcp' => 'DHCP и DNS', 'system' => 'система', 'dropbear' => 'SSH-сервер', 'uhttpd' => 'веб-сервер LuCI',
+		'ssh_keys' => 'SSH-ключи доступа', 'root_password' => 'пароль root', 'crontab' => 'расписание задач (cron)',
+		'packages' => 'установленные пакеты',
+	][$file] ?? $file;
+}
+
+// События от агента: настройки изменены НЕ через панель; входы на роутер (LuCI, SSH, терминал)
+function router_events(array $r, array $events): void
+{
+	$rid = (int)$r['id'];
+	$cfg = [];
+	$logins = [];
+	foreach (array_slice($events, 0, 60) as $ev) {
+		if (!is_array($ev)) {
+			continue;
+		}
+		if (($ev['type'] ?? '') === 'config') {
+			$file = preg_replace('/[^a-z_]/', '', (string)($ev['file'] ?? ''));
+			event($rid, 'Изменено не через панель: ' . watch_label($file));
+			$b = '• <b>' . h(watch_label($file)) . '</b>';
+			foreach (array_slice((array)($ev['removed'] ?? []), 0, 12) as $l) {
+				$b .= "\n   − " . h(mb_substr((string)$l, 0, 160));
+			}
+			foreach (array_slice((array)($ev['added'] ?? []), 0, 12) as $l) {
+				$b .= "\n   + " . h(mb_substr((string)$l, 0, 160));
+			}
+			$cfg[] = $b;
+		} elseif (($ev['type'] ?? '') === 'login') {
+			$ip = (string)($ev['ip'] ?? '');
+			$via = ['luci' => 'LuCI', 'ssh' => 'SSH', 'terminal' => 'терминал'][$ev['via'] ?? ''] ?? (string)($ev['via'] ?? '?');
+			$line = '• ' . $via . ' ' . h((string)($ev['user'] ?? '')) . ($ip !== '' ? ' с ' . h($ip) : '');
+			if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+				$g = ip_geo($ip);
+				$line .= $g['text'] !== '' ? ' (' . h($g['text']) . ($g['proxy'] ? ', VPN/хостинг' : '') . ')' : '';
+			}
+			$line .= !empty($ev['key']) ? ' по SSH-ключу' : '';
+			$line .= !empty($ev['ok']) ? ' — вход выполнен' : ' — <b>НЕВЕРНЫЙ пароль</b>';
+			event($rid, strip_tags(str_replace('• ', 'Вход на роутер: ', $line)));
+			$logins[] = $line;
+		}
+	}
+	$kb = kb([[['📟 Роутер', 'r:' . $rid]]]);
+	if ($cfg) {
+		notify_admins(
+			'⚠️ <b>' . h($r['name']) . "</b>: настройки изменены <b>НЕ через панель</b>\n" . implode("\n", $cfg) .
+			"\n\nЕсли это не вы и не владелец роутера — возможно, кто-то получил к нему доступ.",
+			$kb
+		);
+	}
+	if ($logins) {
+		notify_admins('🔑 <b>' . h($r['name']) . "</b>: вход на роутер\n" . implode("\n", array_slice($logins, 0, 15)), $kb);
+	}
 }
 
 function api_upload(array $r, int $taskId, string $body): array
@@ -539,6 +611,11 @@ function check_alerts(): void
 {
 	$now = time();
 	podkop_latest(true);
+	try {
+		backup_daily();
+	} catch (Throwable $e) {
+		error_log('backup: ' . $e->getMessage());
+	}
 	// Ключи из неудачных смен — не дольше суток
 	foreach (rows("SELECT id, payload FROM tasks WHERE status = 'failed' AND done_at < ? AND (payload LIKE '%\"key\":\"%' OR payload LIKE '%\"outbound\":\"%')", [$now - 86400]) as $t) {
 		$clean = json_encode(scrub_keys(json_decode($t['payload'], true) ?: []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
