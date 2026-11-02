@@ -57,7 +57,8 @@ function fmt_time($ts): string
 // Разметку уведомлений (<b>, <i>, <code>) показываем как есть, остальное экранируем
 function tg_html(string $text): string
 {
-	return nl2br(preg_replace('#&lt;(/?)(b|i|code)&gt;#', '<$1$2>', h($text)));
+	// Текст уведомлений уже экранирован при создании — раскодируем, чтобы не экранировать дважды
+	return nl2br(preg_replace('#&lt;(/?)(b|i|code)&gt;#', '<$1$2>', h(html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8'))));
 }
 
 if (!panel_authed()) {
