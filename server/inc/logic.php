@@ -138,6 +138,19 @@ function section_kind(array $d): string
 	return $type ?: '?';
 }
 
+// Страны в списке серверов подписки: первое слово названия («🇩🇪 Германия №7» → Германия) → сколько серверов
+function sub_countries(array $servers): array
+{
+	$out = [];
+	foreach ($servers as $x) {
+		if (preg_match('/\p{L}[\p{L}-]+/u', (string)($x['name'] ?? ''), $m)) {
+			$out[$m[0]] = ($out[$m[0]] ?? 0) + 1;
+		}
+	}
+	ksort($out);
+	return $out;
+}
+
 // Строка секции для карточки роутера и уведомлений
 function section_line(array $s, array $byName = []): string
 {
@@ -151,13 +164,20 @@ function section_line(array $s, array $byName = []): string
 	}
 	if (is_array($d['sub'] ?? null)) {
 		// Подписка: сколько серверов живо и какой сейчас выбран
-		$srv = $d['sub']['servers'] ?? [];
+		$srv = array_filter($d['sub']['servers'] ?? [], fn($x) => $x['in'] ?? true);
 		$alive = count(array_filter($srv, fn($x) => !empty($x['delay'])));
 		$t .= 'подписка · отвечают ' . $alive . ' из ' . count($srv);
 		foreach ($srv as $x) {
 			if (!empty($x['now'])) {
 				$t .= ' · сейчас ' . h($x['name'] ?: $x['host']);
 			}
+		}
+		if (!empty($d['sub']['pin'])) {
+			$t .= ' · 📌 закреплён';
+		} elseif (!empty($d['sub']['fb'])) {
+			$t .= ' · ⚠️ на запасных странах';
+		} elseif (!empty($d['sub']['only'])) {
+			$t .= ' · только ' . h($d['sub']['only']);
 		}
 	} else {
 		$t .= h($d['scheme'] ?? '?');
@@ -332,6 +352,10 @@ function task_label(string $type, array $p): string
 			return 'обновление podkop';
 		case 'refresh_subscription':
 			return 'обновление списка серверов подписки ' . $sec;
+		case 'sub_switch':
+			return ($p['server'] ?? '') === 'auto'
+				? 'автовыбор сервера подписки ' . $sec
+				: 'переключить ' . $sec . ' на сервер ' . ($p['label'] ?? $p['server'] ?? '');
 		case 'apply_config':
 			$parts = ['секций: ' . count($p['sections'] ?? [])];
 			if (!empty($p['delete'])) {
@@ -548,6 +572,7 @@ function router_events(array $r, array $events): void
 	$rid = (int)$r['id'];
 	$cfg = [];
 	$logins = [];
+	$subNotes = [];
 	foreach (array_slice($events, 0, 60) as $ev) {
 		if (!is_array($ev)) {
 			continue;
@@ -579,9 +604,18 @@ function router_events(array $r, array $events): void
 			$line .= !empty($ev['ok']) ? ' — вход выполнен' : ' — <b>НЕВЕРНЫЙ пароль</b>';
 			event($rid, strip_tags(str_replace('• ', 'Вход на роутер: ', $line)));
 			$logins[] = $line;
+		} elseif (($ev['type'] ?? '') === 'sub_note') {
+			// Подписка сама сменила страну или вернула автовыбор
+			$sec = preg_replace('/[^A-Za-z0-9_]/', '', (string)($ev['section'] ?? ''));
+			$text = mb_substr((string)($ev['text'] ?? ''), 0, 300);
+			event($rid, 'Подписка ' . $sec . ': ' . $text);
+			$subNotes[] = '• <b>' . h($sec) . '</b>: ' . h($text);
 		}
 	}
 	$kb = kb([[['📟 Роутер', 'r:' . $rid]]]);
+	if ($subNotes) {
+		notify_admins('🌍 <b>' . h($r['name']) . "</b>: подписка\n" . implode("\n", array_slice($subNotes, 0, 10)), $kb);
+	}
 	if ($cfg) {
 		notify_admins(
 			'⚠️ <b>' . h($r['name']) . "</b>: настройки изменены <b>НЕ через панель</b>\n" . implode("\n", $cfg) .

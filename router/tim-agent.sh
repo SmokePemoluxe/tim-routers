@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.1"
+VERSION="2.2"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -423,14 +423,26 @@ events_json() {
 # ---------- Обмен с сервером ----------
 
 # ---------- Подписки (ссылка, по которой провайдер отдаёт список ключей) ----------
-# Роутер сам раз в SUB_EVERY секунд (и сразу, если секция не работает) берёт свежий список,
-# оставляет то, что умеет podkop, и кладёт в секцию режимом автовыбора (urltest).
-# Ссылка хранится только здесь, на роутере.
+# Роутер сам берёт свежий список, оставляет то, что умеет podkop, и кладёт в секцию режимом
+# автовыбора (urltest). Ссылка хранится только здесь, на роутере.
 # Для провайдера роутер — обычное приложение на телефоне с постоянным идентификатором:
 # одно «устройство» в лимите подписки, без лишних отметок.
+#
+# В настройки podkop попадают только разрешённые сейчас серверы (sub_wanted), поэтому выбор страны
+# и закрепление держатся и сразу после перезагрузки, пока агент ещё не запущен.
+#
+# Файлы секции в SUB_DIR:
+#   .url .exclude   ссылка; слова, которые исключают сервер
+#   .links .names   все подходящие ключи; их адреса и названия (host:port|тип|название)
+#   .stat .err      всего/подходят/когда обновлено; последняя ошибка
+#   .only           разрешённые страны (слова из названий через запятую)
+#   .fallback       any — если страны не отвечают, взять любые; strict — не переключать никогда
+#   .fb             сейчас работаем на чужих странах (режим any, свои не отвечают)
+#   .pin            закреплённый сервер: host:port|название
+#   .pick           сервер, выбранный вручную «прямо сейчас» (не навсегда)
+#   .policy         обновление списка: 6h, 24h, dead (только при потере связи), off (только вручную)
 
 SUB_DIR="$CONF_DIR/subs"
-SUB_EVERY=21600
 SUB_UA="Incy/2.1 CFNetwork/1568.100.1 Darwin/24.0.0"
 
 sub_hwid() {
@@ -477,6 +489,40 @@ sub_fetch() {
 	return 1
 }
 
+# Записать настройку, только если она изменилась (флэш бережём). 0 — изменилась; пустая удаляет файл.
+sub_opt_set() { # файл значение
+	[ "$(cat "$1" 2>/dev/null)" = "$2" ] && return 1
+	if [ -n "$2" ]; then
+		printf '%s' "$2" > "$1"
+	else
+		rm -f "$1"
+	fi
+	return 0
+}
+
+# Слова с сайта: убрать всё, что могло бы быть понято как шаблон или разметка
+sub_clean() {
+	tr -d '\000-\037"`$\\*?[]|'"'"
+}
+
+# Есть ли в названии хотя бы одно слово из списка через запятую
+words_match() { # название слова
+	wm_ifs=$IFS
+	IFS=','
+	for wm_w in $2; do
+		wm_w=$(echo "$wm_w" | sed 's/^ *//; s/ *$//')
+		[ -n "$wm_w" ] || continue
+		case "$1" in
+			*"$wm_w"*)
+				IFS=$wm_ifs
+				return 0
+				;;
+		esac
+	done
+	IFS=$wm_ifs
+	return 1
+}
+
 # Оставить ключи, которые понимает podkop/sing-box, и выкинуть серверы со словами из исключений
 sub_filter() { # $1 — исключения через запятую; stdin → stdout
 	while IFS= read -r l; do
@@ -486,18 +532,95 @@ sub_filter() { # $1 — исключения через запятую; stdin �
 		esac
 		printf '%s' "$l" | grep -qE '@(0\.0\.0\.0|127\.0\.0\.1):|[?&]type=xhttp|[?&](mode|extra)=' && continue
 		valid_key "$l" || continue
-		name=$(urldecode "${l#*#}")
-		skip=0
-		oldifs=$IFS
-		IFS=','
-		for w in $1; do
-			w=$(echo "$w" | sed 's/^ *//; s/ *$//')
-			[ -n "$w" ] || continue
-			case "$name" in *"$w"*) skip=1 ;; esac
-		done
-		IFS=$oldifs
-		[ "$skip" = 0 ] && printf '%s\n' "$l"
+		words_match "$(urldecode "${l#*#}")" "$1" && continue
+		printf '%s\n' "$l"
 	done
+}
+
+# Название сервера по его адресу
+sub_name_of() { # секция host:port
+	awk -F'|' -v h="$2" '$1 == h { print $3; exit }' "$SUB_DIR/$1.names" 2>/dev/null
+}
+
+# Какие ключи должны быть в podkop прямо сейчас → файл $2.
+# 1 — менять нельзя (в SUB_NOTE причина), остаётся то, что уже настроено.
+sub_wanted() { # секция файл
+	sw_f="$SUB_DIR/$1"
+	SUB_NOTE=""
+	: > "$2"
+	sw_pin=$(cat "$sw_f.pin" 2>/dev/null)
+	if [ -n "$sw_pin" ]; then
+		sw_h=${sw_pin%%|*}
+		sw_n=${sw_pin#*|}
+		sw_found=""
+		while IFS= read -r sw_l; do
+			[ "$(host_of "$sw_l")" = "$sw_h" ] && { sw_found=$sw_l; break; }
+		done < "$sw_f.links"
+		# Адрес мог смениться, а сервер остался — ищем по названию
+		if [ -z "$sw_found" ] && [ -n "$sw_n" ]; then
+			while IFS= read -r sw_l; do
+				[ "$(urldecode "${sw_l#*#}")" = "$sw_n" ] && { sw_found=$sw_l; break; }
+			done < "$sw_f.links"
+		fi
+		if [ -z "$sw_found" ]; then
+			SUB_NOTE="закреплённого сервера «${sw_n:-$sw_h}» больше нет в подписке — оставлен прежний ключ, выберите другой сервер"
+			return 1
+		fi
+		printf '%s\n' "$sw_found" > "$2"
+		return 0
+	fi
+	sw_only=$(cat "$sw_f.only" 2>/dev/null)
+	if [ -z "$sw_only" ]; then
+		cp "$sw_f.links" "$2"
+		return 0
+	fi
+	while IFS= read -r sw_l; do
+		words_match "$(urldecode "${sw_l#*#}")" "$sw_only" && printf '%s\n' "$sw_l"
+	done < "$sw_f.links" > "$2"
+	if [ -s "$2" ] && [ ! -f "$sw_f.fb" ]; then
+		return 0
+	fi
+	if [ "$(cat "$sw_f.fallback" 2>/dev/null)" = "strict" ]; then
+		[ -s "$2" ] && return 0
+		SUB_NOTE="в подписке нет серверов: $sw_only — оставлены прежние, автопереход на другие страны выключен"
+		return 1
+	fi
+	[ -s "$2" ] || SUB_NOTE="в подписке нет серверов: $sw_only — работают все остальные"
+	# Чужие страны — первыми: сразу после запуска автовыбор стоит на первом сервере, а свои сейчас молчат
+	while IFS= read -r sw_l; do
+		words_match "$(urldecode "${sw_l#*#}")" "$sw_only" || printf '%s
+' "$sw_l"
+	done < "$sw_f.links" > "$2.others"
+	cat "$2" >> "$2.others"
+	mv "$2.others" "$2"
+	return 0
+}
+
+# Привести список в podkop к нужному. SUB_CHANGED=1, если что-то поменялось (применяет вызывающий).
+sub_apply_list() { # секция
+	sa_f="$SUB_DIR/$1"
+	sa_want="$RUN_DIR/sub_$1.want"
+	[ -s "$sa_f.links" ] || (umask 077; uci -q get "podkop.$1.urltest_proxy_links" | tr ' ' '\n' > "$sa_f.links")
+	if sub_wanted "$1" "$sa_want"; then
+		sa_cur=$(uci -q get "podkop.$1.urltest_proxy_links" | tr ' ' '\n')
+		if [ "$(opt "$1" proxy_config_type)" != "urltest" ] || [ "$sa_cur" != "$(cat "$sa_want")" ]; then
+			uci set "podkop.$1.proxy_config_type=urltest"
+			uci -q delete "podkop.$1.urltest_proxy_links"
+			while IFS= read -r sa_l; do
+				uci add_list "podkop.$1.urltest_proxy_links=$sa_l"
+			done < "$sa_want"
+			uci -q delete "podkop.$1.proxy_string"
+			uci -q delete "podkop.$1.outbound_json"
+			SUB_CHANGED=1
+			# Выбранного вручную сервера могло не остаться в списке
+			sa_pick=$(cat "$sa_f.pick" 2>/dev/null)
+			if [ -n "$sa_pick" ] && ! awk -v h="$sa_pick" 'index($0, "@" h) { f = 1 } END { exit !f }' "$sa_want"; then
+				sub_drop_pick "$1"
+			fi
+		fi
+	fi
+	[ -n "$SUB_NOTE" ] && echo "$SUB_NOTE" > "$sa_f.err"
+	rm -f "$sa_want"
 }
 
 # Обновить секцию из её подписки. 0 — ок (SUB_CHANGED=1, если список ключей поменялся); 1 — ошибка (SUB_ERR)
@@ -524,51 +647,214 @@ sub_refresh() { # секция
 	fi
 	rm -f "$f.err"
 	echo "$total $usable $(date +%s)" > "$f.stat"
-	# Названия серверов (без ключей) — для показа в панели
-	while IFS= read -r l; do
-		printf '%s|%s|%s\n' "$(host_of "$l")" "${l%%://*}" "$(urldecode "${l#*#}" | tr -d '|')"
-	done < "$RUN_DIR/sub_$s.use" > "$f.names"
-	cur=$(uci -q get "podkop.$s.urltest_proxy_links" | tr ' ' '\n')
-	if [ "$(opt "$s" proxy_config_type)" != "urltest" ] || [ "$cur" != "$(cat "$RUN_DIR/sub_$s.use")" ]; then
-		uci set "podkop.$s.proxy_config_type=urltest"
-		uci -q delete "podkop.$s.urltest_proxy_links"
+	# Флэш бережём: файлы переписываем, только если список действительно изменился
+	if [ "$(cat "$f.links" 2>/dev/null)" != "$(cat "$RUN_DIR/sub_$s.use")" ]; then
+		(umask 077; cp "$RUN_DIR/sub_$s.use" "$f.links")
+		# Названия серверов (без ключей) — для показа в панели
 		while IFS= read -r l; do
-			uci add_list "podkop.$s.urltest_proxy_links=$l"
-		done < "$RUN_DIR/sub_$s.use"
-		uci -q delete "podkop.$s.proxy_string"
-		uci -q delete "podkop.$s.outbound_json"
-		SUB_CHANGED=1
+			printf '%s|%s|%s\n' "$(host_of "$l")" "${l%%://*}" "$(urldecode "${l#*#}" | tr -d '|')"
+		done < "$RUN_DIR/sub_$s.use" > "$f.names"
 	fi
+	sub_apply_list "$s"
 	rm -f "$RUN_DIR/sub_$s.all" "$RUN_DIR/sub_$s.use"
 	return 0
 }
 
-# Плановое обновление всех подписок: раз в SUB_EVERY или сразу, если секция не работает
-subs_tick() {
-	[ -d "$SUB_DIR" ] || return 0
-	SUB_CHANGED=0
-	now=$(date +%s)
-	for u in "$SUB_DIR"/*.url; do
-		[ -f "$u" ] || continue
-		s=$(basename "$u" .url)
-		is_section "$s" || continue
-		last=$(cat "$RUN_DIR/sub_$s.ts" 2>/dev/null || echo 0)
-		due=0
-		[ $((now - last)) -ge "$SUB_EVERY" ] && due=1
-		if [ "$due" = 0 ] && [ $((now - last)) -ge 600 ]; then
-			clash_api_addr
-			section_delay "$s" 1
-			[ -n "$DELAY" ] || due=1
+# Серверы группы из настроек sing-box: строки «тег|host:port»
+sub_members() { # секция
+	sm_cfg=$(uci -q get podkop.settings.config_path)
+	[ -n "$sm_cfg" ] || sm_cfg=/etc/sing-box/config.json
+	for sm_m in $(jsonfilter -i "$sm_cfg" -e "@.outbounds[@.tag=\"$1-urltest-out\"].outbounds[*]" 2>/dev/null); do
+		printf '%s|%s:%s\n' "$sm_m" \
+			"$(jsonfilter -i "$sm_cfg" -e "@.outbounds[@.tag=\"$sm_m\"].server" 2>/dev/null)" \
+			"$(jsonfilter -i "$sm_cfg" -e "@.outbounds[@.tag=\"$sm_m\"].server_port" 2>/dev/null)"
+	done
+}
+
+# Отвечает ли хотя бы один сервер группы; $2 — проверять только серверы с этими словами в названии
+sub_any_alive() { # секция [слова]
+	aa_tmp="$RUN_DIR/sub_$1.members"
+	aa_rc=1
+	sub_members "$1" > "$aa_tmp"
+	while IFS='|' read -r aa_tag aa_host; do
+		if [ -n "$2" ] && ! words_match "$(sub_name_of "$1" "$aa_host")" "$2"; then
+			continue
 		fi
-		if [ "$due" = 1 ]; then
-			if sub_refresh "$s"; then
-				log "подписка $s обновлена"
-			else
-				log "подписка $s: $SUB_ERR"
+		aa_d=$(jsonfilter -s "$(clash_get "/proxies/$aa_tag/delay?timeout=6000&url=$TEST_URL")" -e '@.delay' 2>/dev/null)
+		case "$aa_d" in
+			''|*[!0-9]*|0) ;;
+			*) aa_rc=0; break ;;
+		esac
+	done < "$aa_tmp"
+	rm -f "$aa_tmp"
+	return $aa_rc
+}
+
+# Переключить группу секции на тег (без перезапуска podkop). 0 — переключено.
+sub_select() { # секция тег
+	if [ -n "$CLASH_SECRET" ]; then
+		ss_code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $CLASH_SECRET" -d "{\"name\":\"$2\"}" "http://$CLASH_ADDR/proxies/$1-out")
+	else
+		ss_code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -X PUT -d "{\"name\":\"$2\"}" "http://$CLASH_ADDR/proxies/$1-out")
+	fi
+	[ "$ss_code" = "204" ]
+}
+
+# Автовыбор сам перепроверяет серверы раз в 3 минуты. Если текущий умер, а другие живы, просим сделать это сейчас.
+sub_nudge() { # секция
+	clash_get "/group/$1-urltest-out/delay?timeout=6000&url=$TEST_URL" >/dev/null 2>&1
+}
+
+# Закрыть открытые соединения, чтобы они сразу пошли через новый сервер
+sub_close_conns() {
+	if [ -n "$CLASH_SECRET" ]; then
+		curl -s -m 8 -o /dev/null -X DELETE -H "Authorization: Bearer $CLASH_SECRET" "http://$CLASH_ADDR/connections"
+	else
+		curl -s -m 8 -o /dev/null -X DELETE "http://$CLASH_ADDR/connections"
+	fi
+}
+
+# Забыть ручной выбор. Если sing-box запомнил его номер, вернуть автовыбор при следующей проверке.
+sub_drop_pick() { # секция
+	rm -f "$SUB_DIR/$1.pick"
+	: > "$RUN_DIR/sub_$1.reselect"
+}
+
+sub_inet_ok() {
+	for sio_ip in 1.1.1.1 8.8.8.8 77.88.8.8; do
+		ping -c 1 -W 3 "$sio_ip" >/dev/null 2>&1 && return 0
+	done
+	return 1
+}
+
+sub_note_event() { # секция текст
+	log "подписка $1: $2"
+	add_event "$(printf '{"type":"sub_note","section":%s,"text":%s}' "$(json_str "$1")" "$(json_str "$2")")"
+}
+
+# Как часто обновлять список по времени (0 — по времени не обновлять)
+sub_every() { # секция
+	case "$(cat "$SUB_DIR/$1.policy" 2>/dev/null)" in
+		24h) echo 86400 ;;
+		dead|off) echo 0 ;;
+		*) echo 21600 ;;
+	esac
+}
+
+# Одна секция за один проход. SUB_CHANGED=1, если список в podkop поменялся.
+sub_tick_one() { # секция
+	t_s=$1
+	t_f="$SUB_DIR/$t_s"
+	t_only=$(cat "$t_f.only" 2>/dev/null)
+	t_pin=$(cat "$t_f.pin" 2>/dev/null)
+	t_policy=$(cat "$t_f.policy" 2>/dev/null)
+	t_last=$(cat "$RUN_DIR/sub_$t_s.ts" 2>/dev/null)
+	t_upd=$(cut -d' ' -f3 "$t_f.stat" 2>/dev/null)
+	[ "${t_upd:-0}" -gt "${t_last:-0}" ] 2>/dev/null && t_last=$t_upd
+	t_age=$((t_now - ${t_last:-0}))
+	t_every=$(sub_every "$t_s")
+	t_fetch=0
+	[ "$t_every" -gt 0 ] && [ "$t_age" -ge "$t_every" ] && t_fetch=1
+
+	if ! pidof sing-box >/dev/null; then
+		# podkop не работает: свежий список мог бы помочь (но не чаще раза в 10 минут)
+		[ "$t_policy" != "off" ] && [ "$t_age" -ge 600 ] && t_fetch=1
+	else
+		# Вернуть автовыбор после снятого ручного выбора
+		if [ -f "$RUN_DIR/sub_$t_s.reselect" ]; then
+			[ -f "$t_f.pick" ] || sub_select "$t_s" "$t_s-urltest-out"
+			rm -f "$RUN_DIR/sub_$t_s.reselect"
+		fi
+		# Ручной выбор держим, в том числе после перезапуска sing-box
+		t_pick=$(cat "$t_f.pick" 2>/dev/null)
+		if [ -n "$t_pick" ]; then
+			t_tag=$(sub_members "$t_s" | awk -F'|' -v h="$t_pick" '$2 == h { print $1; exit }')
+			if [ -z "$t_tag" ]; then
+				sub_drop_pick "$t_s"
+				t_pick=""
+			elif [ "$(jsonfilter -s "$(clash_get "/proxies/$t_s-out")" -e '@.now' 2>/dev/null)" != "$t_tag" ]; then
+				sub_select "$t_s" "$t_tag"
 			fi
 		fi
+
+		section_delay "$t_s" 1
+		if [ -n "$DELAY" ]; then
+			rm -f "$RUN_DIR/sub_$t_s.fails"
+		elif [ -n "$t_pick" ]; then
+			# Выбранный вручную сервер умер: «навсегда» — это закрепление, а здесь возвращаем автовыбор
+			rm -f "$t_f.pick"
+			sub_select "$t_s" "$t_s-urltest-out"
+			sub_note_event "$t_s" "выбранный вручную сервер «$(sub_name_of "$t_s" "$t_pick")» перестал отвечать — вернулся автовыбор"
+		elif sub_any_alive "$t_s"; then
+			sub_nudge "$t_s"
+			rm -f "$RUN_DIR/sub_$t_s.fails"
+		else
+			t_fails=$(( $(cat "$RUN_DIR/sub_$t_s.fails" 2>/dev/null || echo 0) + 1 ))
+			echo "$t_fails" > "$RUN_DIR/sub_$t_s.fails"
+			# Два прохода подряд и интернет есть: дело в серверах, а не в связи
+			if [ "$t_fails" -ge 2 ] && sub_inet_ok; then
+				[ "$t_policy" != "off" ] && [ "$t_age" -ge 600 ] && t_fetch=1
+				t_tofb=1
+			fi
+		fi
+	fi
+
+	t_changed=0
+	if [ "$t_fetch" = 1 ]; then
+		SUB_CHANGED=0
+		if sub_refresh "$t_s"; then
+			log "подписка $t_s обновлена"
+		else
+			log "подписка $t_s: $SUB_ERR"
+		fi
+		t_changed=$SUB_CHANGED
+	fi
+
+	# Свои страны молчат: берём любые другие. Если список только что обновился — сначала даём шанс ему.
+	if [ "${t_tofb:-0}" = 1 ] && [ "$t_changed" = 0 ] && [ -n "$t_only" ] && [ -z "$t_pin" ] && \
+		[ ! -f "$t_f.fb" ] && [ "$(cat "$t_f.fallback" 2>/dev/null)" != "strict" ]; then
+		: > "$t_f.fb"
+		SUB_CHANGED=0
+		sub_apply_list "$t_s"
+		t_changed=$SUB_CHANGED
+		rm -f "$RUN_DIR/sub_$t_s.fails" "$RUN_DIR/sub_$t_s.back"
+		sub_note_event "$t_s" "ни один сервер ($t_only) не отвечает — временно работают другие страны"
+	elif [ -f "$t_f.fb" ] && pidof sing-box >/dev/null; then
+		# Вернуться на свои страны, как только они стабильно отвечают
+		if sub_any_alive "$t_s" "$t_only"; then
+			t_back=$(( $(cat "$RUN_DIR/sub_$t_s.back" 2>/dev/null || echo 0) + 1 ))
+			echo "$t_back" > "$RUN_DIR/sub_$t_s.back"
+			if [ "$t_back" -ge 2 ]; then
+				rm -f "$t_f.fb" "$RUN_DIR/sub_$t_s.back"
+				SUB_CHANGED=0
+				sub_apply_list "$t_s"
+				[ "$SUB_CHANGED" = 1 ] && t_changed=1
+				sub_note_event "$t_s" "серверы ($t_only) снова отвечают — вернулись на них"
+			fi
+		else
+			rm -f "$RUN_DIR/sub_$t_s.back"
+		fi
+	fi
+	t_tofb=0
+	SUB_CHANGED=$t_changed
+}
+
+# Проход по всем подпискам (раз в цикл агента)
+subs_tick() {
+	[ -d "$SUB_DIR" ] || return 0
+	t_now=$(date +%s)
+	t_any=0
+	clash_api_addr
+	for u in "$SUB_DIR"/*.url; do
+		[ -f "$u" ] || continue
+		st_s=$(basename "$u" .url)
+		is_section "$st_s" || continue
+		[ "$(opt "$st_s" connection_type)" = "proxy" ] || continue
+		SUB_CHANGED=0
+		sub_tick_one "$st_s"
+		[ "$SUB_CHANGED" = 1 ] && t_any=1
 	done
-	if [ "$SUB_CHANGED" = 1 ]; then
+	if [ "$t_any" = 1 ]; then
 		uci commit podkop
 		podkop_apply
 		PODKOP_CHANGED=0
@@ -578,34 +864,54 @@ subs_tick() {
 
 # Сведения о подписке секции для панели (JSON) — без ссылки и ключей
 sub_json() { # секция
-	f="$SUB_DIR/$1"
-	if [ ! -s "$f.url" ]; then
+	js_f="$SUB_DIR/$1"
+	if [ ! -s "$js_f.url" ]; then
 		printf 'null'
 		return
 	fi
-	set -- "$1" $(cat "$f.stat" 2>/dev/null)
-	tag="$1-urltest-out"
-	proxies=$(clash_get "/proxies" 2>/dev/null)
-	now=$(jsonfilter -s "$proxies" -e "@.proxies[\"$tag\"].now" 2>/dev/null)
-	cfg=$(uci -q get podkop.settings.config_path)
-	[ -n "$cfg" ] || cfg=/etc/sing-box/config.json
-	nowhost=""
-	[ -n "$now" ] && nowhost=$(jsonfilter -i "$cfg" -e "@.outbounds[@.tag=\"$now\"].server" 2>/dev/null)
-	servers=""
-	for m in $(jsonfilter -s "$proxies" -e "@.proxies[\"$tag\"].all[*]" 2>/dev/null); do
-		h=$(jsonfilter -i "$cfg" -e "@.outbounds[@.tag=\"$m\"].server" 2>/dev/null)
-		p=$(jsonfilter -i "$cfg" -e "@.outbounds[@.tag=\"$m\"].server_port" 2>/dev/null)
-		d=$(jsonfilter -s "$proxies" -e "@.proxies[\"$m\"].history[*].delay" 2>/dev/null | tail -n 1)
-		line=$(grep -m 1 "^$h:$p|" "$f.names" 2>/dev/null || grep -m 1 "^$h:" "$f.names" 2>/dev/null)
-		servers="$servers${servers:+,}$(printf '{"host":%s,"type":%s,"name":%s,"delay":%s,"now":%s}' \
-			"$(json_str "$h${p:+:$p}")" "$(json_str "$(echo "$line" | cut -d'|' -f2)")" \
-			"$(json_str "$(echo "$line" | cut -d'|' -f3)")" "$(json_num "$d")" \
-			"$([ "$m" = "$now" ] && echo true || echo false)")"
-	done
-	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"error":%s,"now":%s,"servers":[%s]}' \
+	js_stat=$(cat "$js_f.stat" 2>/dev/null)
+	js_tag="$1-urltest-out"
+	js_pf="$RUN_DIR/sub_$1.proxies"
+	js_mf="$RUN_DIR/sub_$1.map"
+	clash_get "/proxies" > "$js_pf" 2>/dev/null
+	sub_members "$1" > "$js_mf"
+	# Группа либо на автовыборе (тогда сервер назначает urltest), либо на сервере, выбранном вручную
+	js_sel=$(jsonfilter -i "$js_pf" -e "@.proxies[\"$1-out\"].now" 2>/dev/null)
+	if [ -z "$js_sel" ] || [ "$js_sel" = "$js_tag" ]; then
+		js_sel=$(jsonfilter -i "$js_pf" -e "@.proxies[\"$js_tag\"].now" 2>/dev/null)
+	fi
+	js_servers=""
+	js_nowhost=""
+	while IFS='|' read -r js_host js_type js_name; do
+		js_m=$(awk -F'|' -v h="$js_host" '$2 == h { print $1; exit }' "$js_mf")
+		js_d=""
+		js_in=false
+		js_now=false
+		if [ -n "$js_m" ]; then
+			js_in=true
+			js_d=$(jsonfilter -i "$js_pf" -e "@.proxies[\"$js_m\"].history[*].delay" 2>/dev/null | tail -n 1)
+			if [ "$js_m" = "$js_sel" ]; then
+				js_now=true
+				js_nowhost=$js_host
+			fi
+		fi
+		js_servers="$js_servers${js_servers:+,}$(printf '{"host":%s,"type":%s,"name":%s,"delay":%s,"now":%s,"in":%s}' \
+			"$(json_str "$js_host")" "$(json_str "$js_type")" "$(json_str "$js_name")" "$(json_num "$js_d")" "$js_now" "$js_in")"
+	done < "$js_f.names"
+	rm -f "$js_pf" "$js_mf"
+	js_pin=$(cat "$js_f.pin" 2>/dev/null)
+	set -- "$1" $js_stat
+	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"only":%s,"fallback":%s,"fb":%s,"pin":%s,"pin_name":%s,"pick":%s,"policy":%s,"error":%s,"now":%s,"servers":[%s]}' \
 		"$(json_num "$2")" "$(json_num "$3")" "$(json_num "$4")" \
-		"$(json_str "$(cat "$f.exclude" 2>/dev/null)")" "$(json_str "$(cat "$f.err" 2>/dev/null)")" \
-		"$(json_str "$nowhost")" "$servers"
+		"$(json_str "$(cat "$js_f.exclude" 2>/dev/null)")" \
+		"$(json_str "$(cat "$js_f.only" 2>/dev/null)")" \
+		"$(json_str "$(cat "$js_f.fallback" 2>/dev/null || echo any)")" \
+		"$([ -f "$js_f.fb" ] && echo true || echo false)" \
+		"$(json_str "${js_pin%%|*}")" "$(json_str "$([ -n "$js_pin" ] && echo "${js_pin#*|}")")" \
+		"$(json_str "$(cat "$js_f.pick" 2>/dev/null)")" \
+		"$(json_str "$(cat "$js_f.policy" 2>/dev/null || echo 6h)")" \
+		"$(json_str "$(cat "$js_f.err" 2>/dev/null)")" \
+		"$(json_str "$js_nowhost")" "$js_servers"
 }
 
 register() {
@@ -747,6 +1053,7 @@ run_tasks() {
 			update) t_update "$id" ;;
 			update_podkop) t_update_podkop "$id" ;;
 			refresh_subscription) t_refresh_subscription "$id" ;;
+			sub_switch) t_sub_switch "$id" ;;
 			*) add_result "$id" false "агент $VERSION не знает задачу «$type» — обновите скрипты" ;;
 		esac
 		TASK_IDX=$((TASK_IDX + 1))
@@ -1173,6 +1480,7 @@ t_apply_config() {
 	for s in $(task_field 'delete[*]'); do
 		if is_section "$s"; then
 			uci delete "podkop.$s"
+			rm -f "$SUB_DIR/$s".*
 		else
 			errors="$errors; нет секции $s для удаления"
 		fi
@@ -1295,23 +1603,60 @@ t_apply_config() {
 		if [ "$(sec_field sub_on)" = "true" ]; then
 			mkdir -p "$SUB_DIR"
 			chmod 700 "$SUB_DIR"
+			# Свежий список нужен, только если поменялась ссылка или исключения; выбор стран и
+			# закрепление применяются к уже скачанному — подписку лишний раз не дёргаем
+			sf="$SUB_DIR/$name"
+			sub_need=0
+			# У новой секции не должно остаться выбора от прежней с тем же именем (sing-box помнит его в кэше)
+			[ "$NEW_SECTION" = "$name" ] && : > "$RUN_DIR/sub_$name.reselect"
+			[ -s "$sf.links" ] || sub_need=1
 			if [ -n "$su" ]; then
 				case "$su" in
-					http://?*|https://?*) (umask 077; printf '%s' "$su" > "$SUB_DIR/$name.url") ;;
+					http://?*|https://?*)
+						[ "$su" = "$(cat "$sf.url" 2>/dev/null)" ] || sub_need=1
+						(umask 077; printf '%s' "$su" > "$sf.url")
+						;;
 					*) errors="$errors; $name: ссылка подписки должна начинаться с https://" ;;
 				esac
 			fi
-			printf '%s' "$(sec_field sub_exclude | tr -cd 'A-Za-zА-Яа-яЁё0-9 ,._-')" > "$SUB_DIR/$name.exclude"
-			if [ -s "$SUB_DIR/$name.url" ]; then
+			sub_opt_set "$sf.exclude" "$(sec_field sub_exclude | sub_clean)" && sub_need=1
+			sub_opt_set "$sf.only" "$(sec_field sub_only | sub_clean)" && rm -f "$sf.fb"
+			v=$(sec_field sub_fallback)
+			[ "$v" = "strict" ] || v=any
+			sub_opt_set "$sf.fallback" "$v"
+			[ "$v" = "strict" ] && rm -f "$sf.fb"
+			v=$(sec_field sub_policy)
+			case "$v" in 6h|24h|dead|off) ;; *) v=6h ;; esac
+			sub_opt_set "$sf.policy" "$v"
+			v=$(sec_field sub_pin)
+			if [ -z "$v" ]; then
+				rm -f "$sf.pin"
+			elif [ "$v" != "$(sed 's/|.*//' "$sf.pin" 2>/dev/null)" ]; then
+				pin_name=$(sub_name_of "$name" "$v")
+				if grep -qF "$v|" "$sf.names" 2>/dev/null; then
+					sub_opt_set "$sf.pin" "$v|$pin_name"
+				else
+					errors="$errors; $name: сервера $v нет в подписке — закрепление не изменено"
+				fi
+			fi
+			if [ -f "$sf.pin" ]; then
+				rm -f "$sf.fb"
+				[ -f "$sf.pick" ] && sub_drop_pick "$name"
+			fi
+			if [ -s "$sf.url" ]; then
 				SUB_CHANGED=0
-				if sub_refresh "$name"; then
-					set -- $(cat "$SUB_DIR/$name.stat")
-					KEY_NOTES="$KEY_NOTES; $name: из подписки взято серверов: $2 из $1"
+				if [ "$sub_need" = 0 ]; then
+					rm -f "$sf.err"
+					sub_apply_list "$name"
+					KEY_NOTES="$KEY_NOTES; $name: серверов в работе: $(uci -q get "podkop.$name.urltest_proxy_links" | wc -w)"
+				elif sub_refresh "$name"; then
+					set -- $(cat "$sf.stat")
+					KEY_NOTES="$KEY_NOTES; $name: из подписки подходят: $2 из $1, в работе: $(uci -q get "podkop.$name.urltest_proxy_links" | wc -w)"
 				else
 					errors="$errors; $name: $SUB_ERR"
 					if [ "$NEW_SECTION" = "$name" ] && [ -z "$(uci -q get "podkop.$name.urltest_proxy_links")" ]; then
 						uci delete "podkop.$name"
-						rm -f "$SUB_DIR/$name".*
+						rm -f "$sf".*
 						errors="$errors (секция $name не создана)"
 						SEC_IDX=$((SEC_IDX + 1))
 						continue
@@ -1402,6 +1747,7 @@ t_delete_section() {
 		return
 	fi
 	uci delete "podkop.$s"
+	rm -f "$SUB_DIR/$s".*
 	podkop_apply_later
 	add_result "$id" true "секция $s удалена"
 }
@@ -1493,6 +1839,57 @@ t_refresh_subscription() {
 		add_result "$id" false "$SUB_ERR"
 	fi
 }
+
+# «Переключись на этот сервер прямо сейчас» — без перезапуска podkop и без переподключения устройств.
+# Выбор держится, пока сервер отвечает; server=auto возвращает автовыбор.
+t_sub_switch() {
+	id=$1
+	s=$(task_field section)
+	target=$(task_field server)
+	if ! is_section "$s" || [ ! -s "$SUB_DIR/$s.url" ]; then
+		add_result "$id" false "у секции $s нет подписки"
+		return
+	fi
+	if [ -f "$SUB_DIR/$s.pin" ]; then
+		add_result "$id" false "в секции $s сервер закреплён — сначала снимите закрепление"
+		return
+	fi
+	clash_api_addr
+	if [ -z "$CLASH_ADDR" ] || ! pidof sing-box >/dev/null; then
+		add_result "$id" false "podkop не запущен — переключиться нельзя"
+		return
+	fi
+	if [ "$target" = "auto" ]; then
+		rm -f "$SUB_DIR/$s.pick"
+		if sub_select "$s" "$s-urltest-out"; then
+			sub_close_conns
+			add_result "$id" true "$s: снова автовыбор самого быстрого сервера"
+		else
+			add_result "$id" false "$s: sing-box не принял переключение"
+		fi
+		return
+	fi
+	tag=$(sub_members "$s" | awk -F'|' -v h="$target" '$2 == h { print $1; exit }')
+	if [ -z "$tag" ]; then
+		add_result "$id" false "$s: сервер $target сейчас не в работе (другая страна или уже нет в подписке)"
+		return
+	fi
+	if ! sub_select "$s" "$tag"; then
+		add_result "$id" false "$s: sing-box не принял переключение"
+		return
+	fi
+	section_delay "$s" 2
+	if [ -z "$DELAY" ]; then
+		rm -f "$SUB_DIR/$s.pick"
+		sub_select "$s" "$s-urltest-out"
+		add_result "$id" false "$s: сервер «$(sub_name_of "$s" "$target")» не отвечает — остался автовыбор"
+		return
+	fi
+	printf '%s' "$target" > "$SUB_DIR/$s.pick"
+	sub_close_conns
+	add_result "$id" true "$s: работает через «$(sub_name_of "$s" "$target")», $DELAY мс"
+}
+
 # Обновление podkop официальным установщиком (адрес зашит в агенте, сервер его не выбирает).
 # На любые вопросы установщика отвечаем «нет»: так он никогда не сбросит настройки podkop
 # (это он предлагает для версий < 0.7) и не удалит конфликтующие пакеты — просто остановится.

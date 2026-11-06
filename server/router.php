@@ -8,6 +8,7 @@ panel_start();
 panel_require();
 
 const MIN_AGENT = '2.0';
+const SUB_OPTS_AGENT = '2.2'; // выбор стран, закрепление, переключение сервера
 
 $rid = (int)($_GET['id'] ?? 0);
 $router = get_router($rid);
@@ -19,6 +20,7 @@ if (!$router || $router['status'] !== 'active') {
 }
 $info = rinfo($router);
 $agentOk = version_compare((string)($info['agent'] ?? '0'), MIN_AGENT, '>=');
+$subOptsOk = version_compare((string)($info['agent'] ?? '0'), SUB_OPTS_AGENT, '>=');
 
 // ---------- Модель секций для формы ----------
 
@@ -45,6 +47,10 @@ function sections_from_db(int $rid): array
 			'source' => is_array($d['sub'] ?? null) ? 'sub' : 'key',
 			'sub_url' => '',
 			'sub_exclude' => is_array($d['sub'] ?? null) ? (string)($d['sub']['exclude'] ?? '') : 'Россия',
+			'sub_only' => (string)($d['sub']['only'] ?? ''),
+			'sub_fallback' => (string)($d['sub']['fallback'] ?? 'any'),
+			'sub_pin' => (string)($d['sub']['pin'] ?? ''),
+			'sub_policy' => (string)($d['sub']['policy'] ?? '6h'),
 			'domains' => implode("\n", $d['domains'] ?? []),
 			'subnets' => implode("\n", $d['subnets'] ?? []),
 			'community' => $d['community'] ?? [],
@@ -85,6 +91,10 @@ function sections_from_post(int $rid): array
 			'source' => ($p['source'] ?? 'key') === 'sub' ? 'sub' : 'key',
 			'sub_url' => trim((string)($p['sub_url'] ?? '')),
 			'sub_exclude' => trim((string)($p['sub_exclude'] ?? '')),
+			'sub_only' => trim((string)($p['sub_only'] ?? '')),
+			'sub_fallback' => ($p['sub_fallback'] ?? '') === 'strict' ? 'strict' : 'any',
+			'sub_pin' => trim((string)($p['sub_pin'] ?? '')),
+			'sub_policy' => in_array($p['sub_policy'] ?? '', ['6h', '24h', 'dead', 'off'], true) ? $p['sub_policy'] : '6h',
 			'domains' => (string)($p['domains'] ?? ''),
 			'subnets' => (string)($p['subnets'] ?? ''),
 			'community' => array_values(array_filter((array)($p['community'] ?? []), fn($l) => is_string($l) && preg_match('/^[a-z0-9_]{1,30}$/', $l))),
@@ -223,6 +233,13 @@ function build_payload(array $sections, array $settings): array
 			if ($detour !== '') {
 				$errors[] = "{$s['name']}: секцию с подпиской пока нельзя пустить через другую секцию";
 			}
+			if (!mb_check_encoding($s['sub_only'] . $s['sub_exclude'], 'UTF-8')) {
+				$errors[] = "{$s['name']}: в списке стран или исключений неверная кодировка";
+				$s['sub_only'] = $s['sub_exclude'] = '';
+			}
+			if ($s['sub_pin'] !== '' && !preg_match('/^[\w.:\[\]-]{1,100}$/', $s['sub_pin'])) {
+				$errors[] = "{$s['name']}: неверный закреплённый сервер";
+			}
 			$key = '';
 			$detour = '';
 		} elseif ($subOff && $s['type'] === 'proxy' && $key === '') {
@@ -260,6 +277,10 @@ function build_payload(array $sections, array $settings): array
 			'sub_on' => $subOn,
 			'sub_url' => $subOn ? $s['sub_url'] : '',
 			'sub_exclude' => $subOn ? mb_substr(preg_replace('/[^\p{L}\p{N} ,._-]/u', '', $s['sub_exclude']), 0, 200) : '',
+			'sub_only' => $subOn ? mb_substr(preg_replace('/[^\p{L}\p{N} ,._-]/u', '', $s['sub_only']), 0, 200) : '',
+			'sub_fallback' => $s['sub_fallback'],
+			'sub_pin' => $subOn ? $s['sub_pin'] : '',
+			'sub_policy' => $s['sub_policy'],
 			'sub_off' => $subOff,
 			'domains' => $domains,
 			'subnets' => $subnets,
@@ -304,6 +325,24 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 			queue_task($rid, 'refresh_subscription', ['section' => $m[1]]);
 			audit('обновление списка серверов подписки секции ' . $m[1] . ' на роутере «' . $router['name'] . '»');
 			$_SESSION['flash'] = ['ok', 'Роутер обновит список серверов подписки секции ' . $m[1] . ' при следующем выходе на связь (до 2 минут).'];
+			header('Location: router.php?id=' . $rid);
+			exit;
+		}
+		// «Переключиться на этот сервер» и «вернуть автовыбор»
+		if (preg_match('/^sub_switch:([A-Za-z][A-Za-z0-9_]{0,29}):([\w.:\[\]-]{1,100})$/', (string)$_POST['action'], $m)) {
+			$label = $m[2];
+			foreach (router_sections($rid) as $sec) {
+				if ($sec['name'] === $m[1]) {
+					foreach (sdata($sec)['sub']['servers'] ?? [] as $x) {
+						if (($x['host'] ?? '') === $m[2] && !empty($x['name'])) {
+							$label = $x['name'];
+						}
+					}
+				}
+			}
+			queue_task($rid, 'sub_switch', ['section' => $m[1], 'server' => $m[2], 'label' => $label]);
+			audit('переключение сервера подписки ' . $m[1] . ' на роутере «' . $router['name'] . '»: ' . ($m[2] === 'auto' ? 'автовыбор' : $label));
+			$_SESSION['flash'] = ['ok', ($m[2] === 'auto' ? 'Секция ' . $m[1] . ' вернётся на автовыбор' : 'Секция ' . $m[1] . ' переключится на «' . $label . '»') . ' при следующем выходе роутера на связь (до 2 минут). Устройства при этом не отключаются.'];
 			header('Location: router.php?id=' . $rid);
 			exit;
 		}
@@ -407,6 +446,7 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 	$isNew = $s['orig'] === '';
 	$keyEditable = $isNew || in_array($s['config'], ['url', ''], true);
 	$all = array_values(array_unique(array_merge(KNOWN_LISTS, $s['community'])));
+	global $subOptsOk;
 	?>
 	<div class="section<?= $s['delete'] ? ' deleted' : '' ?>" data-section>
 		<input type="hidden" name="sections[<?= $i ?>][orig]" value="<?= h($s['orig']) ?>">
@@ -459,18 +499,60 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 					<div data-src="sub">
 						<label class="field">Ссылка подписки</label>
 						<input type="text" name="sections[<?= $i ?>][sub_url]" value="" placeholder="<?= $s['sub'] ? 'подписка задана — вставьте новую ссылку, чтобы заменить' : 'https://… (та, что импортируется в Happ / INCY)' ?>" autocomplete="off" spellcheck="false">
-						<div class="muted">Ссылка хранится только на роутере. Роутер сам обновляет список серверов раз в 6 ч и сразу, если секция перестала работать.</div>
+						<div class="muted">Ссылка хранится только на роутере.</div>
 						<label class="field">Не использовать серверы, в названии которых есть <span class="muted">(через запятую)</span></label>
 						<input type="text" name="sections[<?= $i ?>][sub_exclude]" value="<?= h($s['sub_exclude']) ?>" placeholder="например: Россия">
+						<?php $srvAll = $s['sub']['servers'] ?? []; ?>
+						<?php if ($subOptsOk): ?>
+							<label class="field">Только эти страны <span class="muted">(слово из названия сервера, через запятую; пусто — все)</span></label>
+							<input type="text" name="sections[<?= $i ?>][sub_only]" value="<?= h($s['sub_only']) ?>" placeholder="например: Германия, Австрия" data-only>
+							<?php if ($countries = sub_countries($srvAll)): ?>
+								<div class="lists" style="margin-top:4px">
+									<?php foreach ($countries as $c => $n): ?>
+										<label><input type="checkbox" data-country="<?= h($c) ?>" onchange="toggleCountry(this)" <?= in_array($c, array_map('trim', explode(',', $s['sub_only'])), true) ? 'checked' : '' ?>> <?= h($c) ?> <span class="muted">(<?= (int)$n ?>)</span></label>
+									<?php endforeach; ?>
+								</div>
+							<?php endif; ?>
+							<label class="field">Если ни один сервер этих стран не отвечает</label>
+							<select name="sections[<?= $i ?>][sub_fallback]">
+								<option value="any" <?= $s['sub_fallback'] !== 'strict' ? 'selected' : '' ?>>Временно взять любую другую страну, потом вернуться</option>
+								<option value="strict" <?= $s['sub_fallback'] === 'strict' ? 'selected' : '' ?>>Не переключать никогда: домены не откроются, пока страна не оживёт</option>
+							</select>
+							<label class="field">📌 Закрепить один сервер <span class="muted">(не менять на более быстрый и не переключать)</span></label>
+							<select name="sections[<?= $i ?>][sub_pin]">
+								<option value="">— не закреплять, выбирать самый быстрый —</option>
+								<?php $pinKnown = false; foreach ($srvAll as $x): $pinKnown = $pinKnown || $x['host'] === $s['sub_pin']; ?>
+									<option value="<?= h($x['host']) ?>" <?= $x['host'] === $s['sub_pin'] ? 'selected' : '' ?>><?= h($x['name'] ?: $x['host']) ?></option>
+								<?php endforeach; ?>
+								<?php if ($s['sub_pin'] !== '' && !$pinKnown): ?>
+									<option value="<?= h($s['sub_pin']) ?>" selected><?= h(($s['sub']['pin_name'] ?? '') ?: $s['sub_pin']) ?> (нет в подписке)</option>
+								<?php endif; ?>
+							</select>
+							<?php if (!$srvAll): ?><div class="muted">Список серверов появится, когда роутер скачает подписку.</div><?php endif; ?>
+							<label class="field">Когда обновлять список серверов</label>
+							<select name="sections[<?= $i ?>][sub_policy]">
+								<?php foreach (['6h' => 'Раз в 6 часов и при потере связи', '24h' => 'Раз в сутки и при потере связи', 'dead' => 'Только когда не отвечает ни один разрешённый сервер', 'off' => 'Никогда сам — только кнопкой'] as $v => $l): ?>
+									<option value="<?= $v ?>" <?= $s['sub_policy'] === $v ? 'selected' : '' ?>><?= $l ?></option>
+								<?php endforeach; ?>
+							</select>
+						<?php else: ?>
+							<div class="muted" style="margin-top:6px">Выбор страны, закрепление и переключение сервера появятся после обновления скриптов роутера (нужен агент <?= SUB_OPTS_AGENT ?>).</div>
+						<?php endif; ?>
 						<?php if ($sub = $s['sub']): ?>
 							<div style="margin-top:8px">
 								<?php if (!empty($sub['error'])): ?><div class="notice err" style="margin:0 0 6px"><?= h($sub['error']) ?></div><?php endif; ?>
 								<span class="muted">Обновлено <?= $sub['updated'] ? ago($sub['updated']) : '—' ?> · подходят <?= (int)$sub['usable'] ?> из <?= (int)$sub['total'] ?> серверов</span>
-								<?php $srv = $sub['servers'] ?? []; $alive = count(array_filter($srv, fn($x) => !empty($x['delay']))); ?>
+								<?php $srv = $sub['servers'] ?? []; $work = array_filter($srv, fn($x) => $x['in'] ?? true); $alive = count(array_filter($work, fn($x) => !empty($x['delay']))); $canSwitch = $subOptsOk && empty($sub['pin']); ?>
+								<?php if (!empty($sub['pin'])): ?><div class="notice" style="margin:0 0 6px">📌 Закреплён сервер «<?= h(($sub['pin_name'] ?? '') ?: $sub['pin']) ?>». Если он перестанет отвечать, роутер не перейдёт на другой, и домены этой секции не откроются.</div><?php endif; ?>
+								<?php if (!empty($sub['fb'])): ?><div class="notice err" style="margin:0 0 6px">⚠️ Серверы «<?= h($sub['only'] ?? '') ?>» не отвечают — временно работают другие страны. Вернётся сам, когда они оживут.</div><?php endif; ?>
+								<?php if (!empty($sub['pick']) && $canSwitch): ?><div class="notice" style="margin:0 0 6px">👆 Сервер выбран вручную. Он останется, пока отвечает; если замолчит, роутер вернётся на автовыбор. <button type="submit" name="action" value="sub_switch:<?= h($s['name']) ?>:auto" formnovalidate onclick="dirty = false">↩️ Вернуть автовыбор</button></div><?php endif; ?>
 								<details style="margin-top:4px">
-									<summary>Серверы: отвечают <?= $alive ?> из <?= count($srv) ?><?php foreach ($srv as $x) { if (!empty($x['now'])) { echo ' · сейчас: ' . h($x['name'] ?: $x['host']); } } ?></summary>
+									<summary>Серверы: отвечают <?= $alive ?> из <?= count($work) ?><?php foreach ($srv as $x) { if (!empty($x['now'])) { echo ' · сейчас: ' . h($x['name'] ?: $x['host']); } } ?></summary>
 									<?php foreach ($srv as $x): ?>
-										<div class="muted"><?= !empty($x['now']) ? '▶ ' : '' ?><?= h($x['name'] ?: '—') ?> · <?= h($x['type']) ?> · <?= h($x['host']) ?> · <?= !empty($x['delay']) ? (int)$x['delay'] . ' мс' : 'не отвечает' ?></div>
+										<?php $xIn = $x['in'] ?? true; ?>
+										<div class="muted" style="margin-top:4px"><?= !empty($x['now']) ? '▶ ' : '' ?><?= h($x['name'] ?: '—') ?> · <?= h($x['type']) ?> · <?= h($x['host']) ?> · <?= !$xIn ? 'не в работе' : (!empty($x['delay']) ? (int)$x['delay'] . ' мс' : 'не отвечает') ?>
+											<?php if ($canSwitch && $xIn && empty($x['now'])): ?><button type="submit" name="action" value="sub_switch:<?= h($s['name']) ?>:<?= h($x['host']) ?>" formnovalidate onclick="dirty = false" style="min-height:0;padding:1px 8px;font-size:12px">▶ сюда</button><?php endif; ?>
+										</div>
 									<?php endforeach; ?>
 								</details>
 								<button type="submit" name="action" value="sub_refresh:<?= h($s['name']) ?>" formnovalidate onclick="dirty = false" style="margin-top:6px">🔄 Обновить список серверов сейчас</button>
@@ -618,7 +700,7 @@ panel_header($router['name']);
 		</div>
 	</form>
 
-	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'sub' => null, 'source' => 'key', 'sub_url' => '', 'sub_exclude' => 'Россия', 'interface' => '', 'dr_enabled' => false, 'dr_type' => 'doh', 'dr_server' => '1.1.1.1', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames, $vpnIfaces); ?></template>
+	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'sub' => null, 'source' => 'key', 'sub_url' => '', 'sub_exclude' => 'Россия', 'sub_only' => '', 'sub_fallback' => 'any', 'sub_pin' => '', 'sub_policy' => '6h', 'interface' => '', 'dr_enabled' => false, 'dr_type' => 'doh', 'dr_server' => '1.1.1.1', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames, $vpnIfaces); ?></template>
 
 	<datalist id="vpn-ifaces"><?php foreach ($vpnIfaces as $v): ?><option value="<?= h($v) ?>"><?php endforeach; ?></datalist>
 
@@ -631,6 +713,16 @@ panel_header($router['name']);
 			sec.querySelectorAll('[data-src]').forEach(el => {
 				el.style.display = el.dataset.src === sel.value ? '' : 'none';
 			});
+		}
+		// Галочка страны дописывает или убирает её в поле «Только эти страны»
+		function toggleCountry(box) {
+			const inp = box.closest('[data-src]').querySelector('[data-only]');
+			const list = inp.value.split(',').map(x => x.trim()).filter(Boolean);
+			const at = list.indexOf(box.dataset.country);
+			if (box.checked && at < 0) list.push(box.dataset.country);
+			if (!box.checked && at >= 0) list.splice(at, 1);
+			inp.value = list.join(', ');
+			dirty = true;
 		}
 		function showType(sel) {
 			const sec = sel.closest('[data-section]');
