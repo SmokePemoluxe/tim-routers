@@ -6,6 +6,12 @@
 
 require __DIR__ . '/inc/bootstrap.php';
 
+// Только в админке: в кабинете пользователей этого нет
+if (is_service()) {
+	http_response_code(404);
+	exit;
+}
+
 if (PHP_SAPI !== 'cli' && !hash_equals((string)cfg('webhook_secret'), (string)($_GET['key'] ?? ''))) {
 	http_response_code(403);
 	exit;

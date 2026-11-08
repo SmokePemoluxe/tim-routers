@@ -10,7 +10,75 @@ $notice = '';
 
 // ---------- Вход: пароль → (если нужно) код двухфакторки ----------
 
-if (!panel_authed() && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['password']) || isset($_POST['code']))) {
+if (is_service() && !panel_authed() && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['password']) || isset($_POST['code']))) {
+	// Кабинет пользователя: почта + пароль → (если включена) код двухфакторки
+	if ($left = login_locked()) {
+		$notice = 'Слишком много неудачных попыток. Попробуйте через ' . ceil($left / 60) . ' мин.';
+	} elseif (!csrf_ok()) {
+		$notice = 'Страница устарела — попробуйте ещё раз.';
+	} elseif (isset($_POST['password'])) {
+		$u = user_by_email((string)($_POST['email'] ?? ''));
+		// Проверяем хэш и для несуществующей почты — чтобы по времени ответа нельзя было угадать, кто зарегистрирован
+		$ok = password_verify((string)$_POST['password'], $u['pass_hash'] ?? hash_password('нет такого пользователя'));
+		$accLock = $u ? kv_get('ufail_' . $u['id']) : null;
+		if ($u && $accLock && $accLock['n'] >= 10 && time() - $accLock['ts'] < 1800) {
+			$notice = 'Вход в этот кабинет временно заблокирован из-за неудачных попыток. Попробуйте через ' . ceil((1800 - (time() - $accLock['ts'])) / 60) . ' мин или восстановите пароль.';
+		} elseif ($ok && $u['status'] === 'active') {
+			kv_del('ufail_' . $u['id']);
+			if (password_needs_rehash($u['pass_hash'], defined('PASSWORD_ARGON2ID') ? PASSWORD_ARGON2ID : PASSWORD_DEFAULT)) {
+				q('UPDATE users SET pass_hash = ? WHERE id = ?', [hash_password((string)$_POST['password']), $u['id']]);
+			}
+			set_uid((int)$u['id']);
+			$GLOBALS['USER'] = $u;
+			if (totp_settings()['enabled'] && !device_trusted(device_id())) {
+				session_regenerate_id(true);
+				$_SESSION['pw_ok'] = time();
+				$_SESSION['pw_uid'] = (int)$u['id'];
+				set_uid(0);
+				$GLOBALS['USER'] = null;
+			} else {
+				complete_login(false, (int)$u['id']);
+				header('Location: index.php');
+				exit;
+			}
+		} else {
+			sleep(1);
+			if ($u) {
+				$f = $accLock && time() - $accLock['ts'] < 1800 ? $accLock : ['n' => 0];
+				$f['n']++;
+				$f['ts'] = time();
+				kv_set('ufail_' . $u['id'], $f);
+				set_uid((int)$u['id']);
+				event(null, 'Неудачный вход в кабинет, IP ' . client_ip());
+				if ($f['n'] === 10) {
+					notify_user((int)$u['id'], '🚨 <b>Кто-то подбирает пароль к вашему кабинету.</b> 10 неудачных попыток — вход заблокирован на 30 минут.' . "\nIP: " . h(client_ip()) . "\n\nЕсли это не вы — смените пароль и включите двухфакторную защиту.");
+				}
+				set_uid(0);
+			}
+			login_failed('неверный пароль кабинета');
+			$notice = ($u && $u['status'] === 'blocked' && $ok) ? 'Кабинет заблокирован. Напишите в поддержку сервиса.' : 'Неверная почта или пароль';
+		}
+	} elseif (isset($_POST['code']) && !empty($_SESSION['pw_ok']) && time() - (int)$_SESSION['pw_ok'] < 300 && !empty($_SESSION['pw_uid'])) {
+		$uid = (int)$_SESSION['pw_uid'];
+		set_uid($uid);
+		$GLOBALS['USER'] = get_user($uid);
+		if ($GLOBALS['USER'] && $GLOBALS['USER']['status'] === 'active' && totp_check((string)$_POST['code'])) {
+			complete_login(true, $uid);
+			header('Location: index.php');
+			exit;
+		}
+		set_uid(0);
+		$GLOBALS['USER'] = null;
+		sleep(1);
+		login_failed('неверный код двухфакторки кабинета', $uid);
+		$notice = 'Неверный код';
+	} else {
+		unset($_SESSION['pw_ok'], $_SESSION['pw_uid']);
+		$notice = 'Время на ввод кода вышло — войдите заново.';
+	}
+}
+
+if (!is_service() && !panel_authed() && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['password']) || isset($_POST['code']))) {
 	if ($left = login_locked()) {
 		$notice = 'Слишком много неудачных попыток. Попробуйте через ' . ceil($left / 60) . ' мин.';
 	} elseif (isset($_POST['password'])) {
@@ -42,7 +110,8 @@ if (!panel_authed() && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($
 		$notice = 'Время на ввод кода вышло — введите пароль заново.';
 	}
 }
-if (isset($_GET['logout'])) {
+// Выход — только по ссылке со своим кодом формы (чужая страница не сможет нас «разлогинить»)
+if (isset($_GET['logout']) && hash_equals((string)($_SESSION['csrf'] ?? ''), (string)$_GET['logout'])) {
 	$_SESSION = [];
 	session_destroy();
 	header('Location: index.php');
@@ -66,15 +135,31 @@ if (!panel_authed()) {
 	panel_header('Вход');
 	?>
 	<div class="card login">
-		<h2>Панель роутеров</h2>
+		<h2><?= is_service() ? 'Вход в кабинет' : 'Панель роутеров' ?></h2>
 		<?php if ($notice): ?><div class="notice err"><?= h($notice) ?></div><?php endif; ?>
+		<?php if (!empty($_SESSION['flash_guest'])): ?><div class="notice ok"><?= h($_SESSION['flash_guest']) ?></div><?php unset($_SESSION['flash_guest']); endif; ?>
 		<?php if ($step2): ?>
 			<form method="post">
+				<?= csrf_field() ?>
 				<p>Введите код из Google Authenticator (или резервный код):</p>
 				<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" autofocus style="font-size:20px;letter-spacing:4px;text-align:center">
 				<p><button type="submit" class="primary" style="width:100%">Подтвердить</button></p>
 				<p class="muted">На этом устройстве код не будет спрашиваться <?= TRUST_DAYS ?> дней.</p>
 			</form>
+		<?php elseif (is_service()): ?>
+			<form method="post">
+				<?= csrf_field() ?>
+				<label class="field">Почта</label>
+				<input type="email" name="email" autocomplete="username" required autofocus value="<?= h((string)($_POST['email'] ?? '')) ?>">
+				<label class="field">Пароль</label>
+				<input type="password" name="password" autocomplete="current-password" required>
+				<p><button type="submit" class="primary" style="width:100%">Войти</button></p>
+			</form>
+			<p style="text-align:center"><a href="reset.php">Забыли пароль?</a></p>
+			<?php if (svc()['registration'] === 'open'): ?>
+				<p style="text-align:center">Нет кабинета? <a href="register.php"><b>Зарегистрироваться</b></a></p>
+			<?php endif; ?>
+			<p class="muted">Сервис для удалённого управления роутерами OpenWrt с podkop: состояние, ключи и списки доменов, уведомления о сбоях.</p>
 		<?php else: ?>
 			<form method="post">
 				<input type="password" name="password" placeholder="Пароль" autofocus>
@@ -92,12 +177,20 @@ if (!panel_authed()) {
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 	$rid = (int)($_POST['rid'] ?? 0);
 	$r = get_router($rid);
+	if ($r && (int)$r['user_id'] !== cur_uid()) {
+		$r = null; // чужой роутер — как будто его нет
+	}
+	$me = cur_user();
 	if (!csrf_ok()) {
 		$notice = 'Форма устарела — обновите страницу.';
+	} elseif (is_service() && !user_can_manage($me) && $_POST['action'] !== 'reject') {
+		$notice = 'Подписка не активна — управление роутерами недоступно. Как продлить — в «Настройках».';
 	} elseif ($r && $r['status'] === 'pending' && $_POST['action'] === 'accept') {
 		$name = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)($_POST['name'] ?? ''))), 0, 40);
 		if ($name === '') {
 			$notice = 'Укажите имя роутера.';
+		} elseif (is_service() && (int)val("SELECT COUNT(*) FROM routers WHERE user_id = ? AND status = 'active'", [cur_uid()]) >= user_router_limit($me)) {
+			$notice = 'Достигнут лимит роутеров в кабинете (' . user_router_limit($me) . '). Удалите ненужный или напишите в поддержку.';
 		} else {
 			q("UPDATE routers SET name = ?, status = 'active' WHERE id = ?", [$name, $rid]);
 			event($rid, 'Принят в систему как «' . $name . '»');
@@ -107,9 +200,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 			exit;
 		}
 	} elseif ($_POST['action'] === 'update_all') {
-		$ref = trim((string)($_POST['ref'] ?? ''));
+		$ref = is_service() ? 'main' : trim((string)($_POST['ref'] ?? ''));
 		if (preg_match('/^[A-Za-z0-9._-]{1,40}$/', $ref)) {
-			$ids = array_column(rows("SELECT id FROM routers WHERE status = 'active'"), 'id');
+			$ids = array_column(rows("SELECT id FROM routers WHERE status = 'active' AND user_id = ?", [cur_uid()]), 'id');
 			foreach ($ids as $id) {
 				queue_task((int)$id, 'update', ['ref' => $ref]);
 			}
@@ -119,13 +212,23 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 		header('Location: index.php');
 		exit;
 	} elseif ($_POST['action'] === 'invite') {
-		$_SESSION['invite'] = ['code' => invite_create(), 'ts' => time()];
+		if (is_service() && empty($me['verified_at'])) {
+			$_SESSION['flash'] = 'Сначала подтвердите почту — ссылка в письме после регистрации.';
+			header('Location: index.php');
+			exit;
+		}
+		if (is_service() && user_router_count(cur_uid()) >= user_router_limit($me)) {
+			$_SESSION['flash'] = 'Достигнут лимит роутеров в кабинете (' . user_router_limit($me) . ').';
+			header('Location: index.php');
+			exit;
+		}
+		$_SESSION['invite'] = ['code' => invite_create(cur_uid()), 'ts' => time()];
 		audit('создан код приглашения для нового роутера (действует ' . (INVITE_TTL / 3600) . ' ч, один раз)');
 		header('Location: index.php#install');
 		exit;
 	} elseif ($_POST['action'] === 'podkop_all') {
 		$n = 0;
-		foreach (rows("SELECT * FROM routers WHERE status = 'active'") as $rr) {
+		foreach (rows("SELECT * FROM routers WHERE status = 'active' AND user_id = ?", [cur_uid()]) as $rr) {
 			if (podkop_outdated((string)(rinfo($rr)['podkop'] ?? ''))) {
 				queue_task((int)$rr['id'], 'update_podkop');
 				$n++;
@@ -256,7 +359,7 @@ function block_updates(array $routers): string
 			<h2>⬆️ Обновления на всех роутерах</h2>
 			<form method="post" class="row" onsubmit="return confirm('Обновить скрипты (сторож и агент) на всех роутерах?')">
 				<?= csrf_field() ?>
-				<input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег">
+				<?php if (!is_service()): ?><input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег"><?php endif; ?>
 				<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
 			</form>
 			<form method="post" class="row" style="margin-top:8px" onsubmit="return confirm('Обновить podkop на роутерах, где он устарел? Откатить обновление podkop нельзя — лучше сначала проверить на одном роутере.')">
@@ -273,7 +376,7 @@ function block_updates(array $routers): string
 function block_alerts(): string
 {
 	return capture(function () {
-		$alerts = rows('SELECT * FROM outbox ORDER BY id DESC LIMIT 15');
+		$alerts = rows('SELECT * FROM outbox WHERE user_id = ? ORDER BY id DESC LIMIT 15', [cur_uid()]);
 		?>
 		<div class="card">
 			<h2>🔔 Уведомления</h2>
@@ -289,7 +392,7 @@ function block_alerts(): string
 function block_tasks(): string
 {
 	return capture(function () {
-		$tasks = rows('SELECT t.*, r.name AS rname FROM tasks t LEFT JOIN routers r ON r.id = t.router_id ORDER BY t.id DESC LIMIT 15');
+		$tasks = rows('SELECT t.*, r.name AS rname FROM tasks t JOIN routers r ON r.id = t.router_id WHERE r.user_id = ? ORDER BY t.id DESC LIMIT 15', [cur_uid()]);
 		?>
 		<div class="card">
 			<h2>Задачи для роутеров</h2>
@@ -310,7 +413,7 @@ function block_tasks(): string
 function block_events(): string
 {
 	return capture(function () {
-		foreach (rows('SELECT e.*, r.name AS rname FROM events e LEFT JOIN routers r ON r.id = e.router_id ORDER BY e.id DESC LIMIT 50') as $e) {
+		foreach (rows('SELECT e.*, r.name AS rname FROM events e LEFT JOIN routers r ON r.id = e.router_id WHERE e.user_id = ? ORDER BY e.id DESC LIMIT 50', [cur_uid()]) as $e) {
 			?><div class="item"><span class="muted"><?= fmt_time($e['ts']) ?> · <?= h($e['rname'] ?? '') ?></span><br><?= h($e['text']) ?></div><?php
 		}
 	});
@@ -318,8 +421,8 @@ function block_events(): string
 
 function all_blocks(): array
 {
-	$pending = rows("SELECT * FROM routers WHERE status = 'pending' ORDER BY id");
-	$routers = rows("SELECT * FROM routers WHERE status = 'active' ORDER BY name COLLATE NOCASE");
+	$pending = rows("SELECT * FROM routers WHERE status = 'pending' AND user_id = ? ORDER BY id", [cur_uid()]);
+	$routers = rows("SELECT * FROM routers WHERE status = 'active' AND user_id = ? ORDER BY name COLLATE NOCASE", [cur_uid()]);
 	return [
 		'pending' => block_pending($pending),
 		'routers' => block_routers($routers),
@@ -342,6 +445,17 @@ $blocks = all_blocks();
 panel_header('Обзор');
 ?>
 	<?php if ($notice): ?><div class="notice"><?= h($notice) ?></div><?php endif; ?>
+	<?php if (is_service()): $me = cur_user(); $plan = user_plan($me); ?>
+		<?php if (empty($me['verified_at'])): ?>
+			<div class="notice">📧 Подтвердите почту <b><?= h($me['email']) ?></b> — ссылка в письме. Пока почта не подтверждена, роутеры добавлять нельзя.
+				<form method="post" action="verify.php" style="display:inline"><?= csrf_field() ?><button name="resend" value="1">Отправить письмо ещё раз</button></form></div>
+		<?php endif; ?>
+		<?php if (!$plan['active']): ?>
+			<div class="notice err">⏳ Подписка <?= h($plan['label']) ?>. Роутеры продолжают работать как настроены, но менять настройки и добавлять новые нельзя<?= $plan['notify'] ? ', уведомления скоро прекратятся' : ', уведомления не приходят' ?>. <a href="settings.php#plan">Как продлить</a></div>
+		<?php elseif (!$plan['free'] && $plan['until'] - time() < 3 * 86400): ?>
+			<div class="notice">⏳ Подписка: <?= h($plan['label']) ?>. <a href="settings.php#plan">Как продлить</a></div>
+		<?php endif; ?>
+	<?php endif; ?>
 
 	<div id="b-pending"><?= $blocks['pending'] ?></div>
 	<div id="b-routers"><?= $blocks['routers'] ?></div>
@@ -354,6 +468,7 @@ panel_header('Обзор');
 		<summary><h2 style="display:inline">➕ Как подключить роутер</h2></summary>
 		<p>Нужно: роутер с OpenWrt и интернетом. podkop ставить заранее не обязательно — установщик поставит его сам и сразу выставит DNS через DoH 1.1.1.1.</p>
 		<p><b>1.</b> Зайти на роутер по SSH: в PowerShell <code>ssh root@192.168.1.1</code> (адрес роутера может отличаться).</p>
+		<?php if (is_service()): ?><p class="muted">Роутеров в кабинете: <?= user_router_count(cur_uid()) ?> из <?= user_router_limit(cur_user()) ?>.</p><?php endif; ?>
 		<p><b>2.</b> Вставить одну команду и нажать Enter. В команде — <b>одноразовый код приглашения</b>: без него сервер не примет новый роутер. Код действует <?= INVITE_TTL / 3600 ?> ч и подходит для одного роутера.</p>
 		<?php if ($invFresh): ?>
 			<pre class="cmd"><?= h(install_command($inv['code'])) ?></pre>

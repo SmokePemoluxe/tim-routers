@@ -30,13 +30,13 @@ function cancel_kb(string $back = 'cx'): array
 
 function screen_main(): array
 {
-	$routers = rows("SELECT * FROM routers WHERE status = 'active'");
+	$routers = rows("SELECT * FROM routers WHERE status = 'active' AND user_id = 0");
 	$cnt = ['🟢' => 0, '🔴' => 0, '⚫' => 0];
 	foreach ($routers as $r) {
 		$icon = router_icon($r);
 		$cnt[$icon] = ($cnt[$icon] ?? 0) + 1;
 	}
-	$pending = (int)val("SELECT COUNT(*) FROM routers WHERE status = 'pending'");
+	$pending = (int)val("SELECT COUNT(*) FROM routers WHERE status = 'pending' AND user_id = 0");
 
 	$text = "🛰 <b>Мои роутеры</b>\n\n";
 	if (!$routers) {
@@ -68,7 +68,7 @@ function screen_add_router(): array
 
 function screen_routers(): array
 {
-	$routers = rows("SELECT * FROM routers WHERE status = 'active' ORDER BY name COLLATE NOCASE");
+	$routers = rows("SELECT * FROM routers WHERE status = 'active' AND user_id = 0 ORDER BY name COLLATE NOCASE");
 	if (!$routers) {
 		return ['Роутеров пока нет.', kb([[['⬅️ Назад', 'm']]])];
 	}
@@ -82,7 +82,7 @@ function screen_routers(): array
 
 function screen_pending(): array
 {
-	$list = rows("SELECT * FROM routers WHERE status = 'pending' ORDER BY id");
+	$list = rows("SELECT * FROM routers WHERE status = 'pending' AND user_id = 0 ORDER BY id");
 	if (!$list) {
 		return ['Новых роутеров нет.', kb([[['⬅️ Назад', 'm']]])];
 	}
@@ -260,7 +260,7 @@ function key_targets(): array
 {
 	$dead = [];
 	$alive = [];
-	foreach (rows("SELECT s.*, r.name AS rname FROM sections s JOIN routers r ON r.id = s.router_id WHERE r.status = 'active' ORDER BY r.name COLLATE NOCASE, s.pos") as $s) {
+	foreach (rows("SELECT s.*, r.name AS rname FROM sections s JOIN routers r ON r.id = s.router_id WHERE r.status = 'active' AND r.user_id = 0 ORDER BY r.name COLLATE NOCASE, s.pos") as $s) {
 		if (!key_changeable(sdata($s))) {
 			continue;
 		}
@@ -764,7 +764,7 @@ function on_text(int $uid, $chat, string $text, array $st): void
 				return;
 			}
 			$rid = (int)$st['rid'];
-			$targets = $rid ? [$rid] : array_map('intval', array_column(rows("SELECT id FROM routers WHERE status = 'active'"), 'id'));
+			$targets = $rid ? [$rid] : array_map('intval', array_column(rows("SELECT id FROM routers WHERE status = 'active' AND user_id = 0"), 'id'));
 			foreach ($targets as $t) {
 				queue_task($t, 'update', ['ref' => $text]);
 			}

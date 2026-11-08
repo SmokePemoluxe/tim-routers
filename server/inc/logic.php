@@ -179,6 +179,9 @@ function section_line(array $s, array $byName = []): string
 		} elseif (!empty($d['sub']['only'])) {
 			$t .= ' · только ' . h($d['sub']['only']);
 		}
+		if (empty($d['sub']['pin']) && !empty($d['sub']['sticky'])) {
+			$t .= ' · держится за текущий';
+		}
 	} else {
 		$t .= h($d['scheme'] ?? '?');
 		if (!empty($d['host'])) {
@@ -212,14 +215,18 @@ function router_mac_line(array $info): string
 }
 
 // Роутер с теми же MAC уже был в системе (переустановили агент, сбросили роутер)?
-function find_same_router(array $info, int $exceptId = 0): ?array
+// Только среди роутеров того же владельца: чужие роутеры пользователю не показываем
+function find_same_router(array $info, int $exceptId = 0, ?int $uid = null): ?array
 {
+	if ($uid === null) {
+		$uid = $exceptId ? (int)val('SELECT user_id FROM routers WHERE id = ?', [$exceptId]) : cur_uid();
+	}
 	foreach (['mac_wan', 'mac_lan'] as $k) {
 		$mac = strtolower((string)($info[$k] ?? ''));
 		if (!preg_match('/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/', $mac)) {
 			continue;
 		}
-		foreach (rows('SELECT * FROM routers WHERE id != ? AND info LIKE ? ORDER BY id DESC', [$exceptId, '%' . $mac . '%']) as $r) {
+		foreach (rows('SELECT * FROM routers WHERE id != ? AND user_id = ? AND info LIKE ? ORDER BY id DESC', [$exceptId, $uid, '%' . $mac . '%']) as $r) {
 			if (strtolower((string)(rinfo($r)[$k] ?? '')) === $mac) {
 				return $r;
 			}
@@ -414,7 +421,7 @@ function finish_task(array $r, array $t, bool $ok, string $msg): void
 		$buttons[] = [['🔁 Применить без проверки', 'kf:' . $t['id']]];
 	}
 	$buttons[] = [['📟 Роутер', 'r:' . $r['id']]];
-	notify_admins(($ok ? '✅' : '❌') . ' <b>' . h($r['name']) . '</b>: ' . h($label) . "\n" . h($msg), kb($buttons));
+	notify_owner((int)$r['user_id'], ($ok ? '✅' : '❌') . ' <b>' . h($r['name']) . '</b>: ' . h($label) . "\n" . h($msg), kb($buttons));
 }
 
 // ---------- API для роутеров ----------
@@ -431,16 +438,27 @@ function clean_info($info): array
 
 function api_register(array $in): array
 {
-	if ((int)val("SELECT COUNT(*) FROM routers WHERE status = 'pending'") >= 20) {
+	if ((int)val("SELECT COUNT(*) FROM routers WHERE status = 'pending'") >= 200) {
 		http_response_code(429);
 		return ['error' => 'too_many_pending'];
 	}
 	$info = clean_info($in['info'] ?? null);
 
-	// Без действующего кода приглашения (из панели) новый роутер не принимаем
-	if (!invite_use((string)($in['invite'] ?? ''), 0)) {
+	// Без действующего кода приглашения (из панели или кабинета) новый роутер не принимаем.
+	// Код знает, чей будет роутер.
+	$uid = invite_use((string)($in['invite'] ?? ''));
+	if ($uid !== null && $uid > 0) {
+		$u = get_user($uid);
+		if (!user_can_manage($u) || user_router_count($uid) >= user_router_limit($u)) {
+			event(null, 'Отклонена регистрация роутера: в кабинете ' . ($u ? $u['email'] : '#' . $uid) . ' нет места или подписка не активна');
+			http_response_code(403);
+			return ['error' => 'invite_required'];
+		}
+		set_uid($uid);
+	}
+	if ($uid === null) {
 		event(null, 'Отклонена регистрация без кода приглашения: ' . mb_substr((string)($info['model'] ?? '?'), 0, 40) . ', IP ' . client_ip());
-		if (time() - (int)kv_get('invite_reject_notified', 0) > 3600) {
+		if (!is_service() && time() - (int)kv_get('invite_reject_notified', 0) > 3600) {
 			kv_set('invite_reject_notified', time());
 			notify_admins('🚫 Роутер пытался зарегистрироваться без кода приглашения (IP ' . h(client_ip()) . ', ' . h((string)($info['model'] ?? '?')) . "). Если это ваш — получите команду с кодом в панели. Следующие такие попытки — только в журнале событий, не чаще раза в час.");
 		}
@@ -450,15 +468,16 @@ function api_register(array $in): array
 
 	$token = bin2hex(random_bytes(24));
 	$name = mb_substr(trim((string)($info['hostname'] ?? '')), 0, 40) ?: 'Новый роутер';
-	q('INSERT INTO routers (token_hash, name, status, created_at, last_seen, ip, info) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+	q('INSERT INTO routers (token_hash, name, status, created_at, last_seen, ip, info, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
 		hash('sha256', $token), $name, 'pending', time(), time(), client_ip(),
-		json_encode($info, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+		json_encode($info, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $uid,
 	]);
 	$id = (int)db()->lastInsertId();
 	event($id, 'Новый роутер просится в систему');
-	$same = find_same_router($info, $id);
+	$same = find_same_router($info, $id, $uid);
 	$statusRu = ['active' => 'в работе', 'pending' => 'ждёт подтверждения', 'rejected' => 'отклонён', 'removed' => 'удалён'];
-	notify_admins(
+	notify_owner(
+		$uid,
 		"🆕 <b>Новый роутер просится в систему</b>\n\n" .
 		'Имя на роутере: ' . h($name) . "\n" .
 		router_hw_line($info) . "\n" .
@@ -487,7 +506,7 @@ function api_sync(array $r, array $in): array
 		$gone = $r['last_seen'] ? dur($now - (int)$r['last_seen']) : '?';
 		event($rid, "Снова на связи (не было $gone)");
 		if (!is_muted($r)) {
-			notify_admins('🟢 <b>' . h($r['name']) . "</b> снова на связи (не было $gone)", kb([[['📟 Роутер', 'r:' . $rid]]]));
+			notify_owner((int)$r['user_id'], '🟢 <b>' . h($r['name']) . "</b> снова на связи (не было $gone)", kb([[['📟 Роутер', 'r:' . $rid]]]));
 		}
 	}
 	if ($r['status'] !== 'active') {
@@ -614,17 +633,17 @@ function router_events(array $r, array $events): void
 	}
 	$kb = kb([[['📟 Роутер', 'r:' . $rid]]]);
 	if ($subNotes) {
-		notify_admins('🌍 <b>' . h($r['name']) . "</b>: подписка\n" . implode("\n", array_slice($subNotes, 0, 10)), $kb);
+		notify_owner((int)$r['user_id'], '🌍 <b>' . h($r['name']) . "</b>: подписка\n" . implode("\n", array_slice($subNotes, 0, 10)), $kb);
 	}
 	if ($cfg) {
-		notify_admins(
+		notify_owner((int)$r['user_id'],
 			'⚠️ <b>' . h($r['name']) . "</b>: настройки изменены <b>НЕ через панель</b>\n" . implode("\n", $cfg) .
 			"\n\nЕсли это не вы и не владелец роутера — возможно, кто-то получил к нему доступ.",
 			$kb
 		);
 	}
 	if ($logins) {
-		notify_admins('🔑 <b>' . h($r['name']) . "</b>: вход на роутер\n" . implode("\n", array_slice($logins, 0, 15)), $kb);
+		notify_owner((int)$r['user_id'], '🔑 <b>' . h($r['name']) . "</b>: вход на роутер\n" . implode("\n", array_slice($logins, 0, 15)), $kb);
 	}
 }
 
@@ -643,8 +662,8 @@ function api_upload(array $r, int $taskId, string $body): array
 	file_put_contents($file, $body);
 	q("UPDATE tasks SET status = 'done', done_at = ?, result = ? WHERE id = ?", [time(), 'отчёт получен', $taskId]);
 	event((int)$r['id'], 'Получен отчёт: ' . $fname);
-	if (!cfg('bot_token')) {
-		notify_admins('📄 <b>' . h($r['name']) . '</b>: получен отчёт — скачать на странице роутера');
+	if (!cfg('bot_token') || (int)$r['user_id'] !== 0) {
+		notify_owner((int)$r['user_id'], '📄 <b>' . h($r['name']) . '</b>: получен отчёт — скачать на странице роутера');
 		return ['ok' => true];
 	}
 	foreach (cfg('admin_ids', []) as $admin) {
@@ -675,7 +694,9 @@ function check_alerts(): void
 			q('UPDATE tasks SET payload = ? WHERE id = ?', [$clean, $t['id']]);
 		}
 	}
+	q('DELETE FROM tokens WHERE expires < ?', [$now]);
 	$failAfter = (int)cfg('fail_notify_after', 600);
+	// Всё раскладываем по владельцам роутеров: каждому — только о его роутерах
 	$offline = [];
 	$new = [];
 	$remind = [];
@@ -683,6 +704,7 @@ function check_alerts(): void
 
 	foreach (rows("SELECT * FROM routers WHERE status = 'active'") as $r) {
 		$rid = (int)$r['id'];
+		$uid = (int)$r['user_id'];
 		$muted = is_muted($r);
 
 		if (!is_online($r)) {
@@ -690,7 +712,7 @@ function check_alerts(): void
 				q('UPDATE routers SET offline_notified = 1 WHERE id = ?', [$rid]);
 				event($rid, 'Не выходит на связь');
 				if (!$muted) {
-					$offline[] = $r;
+					$offline[$uid][] = $r;
 				}
 			}
 			continue;
@@ -701,8 +723,8 @@ function check_alerts(): void
 				q('UPDATE sections SET notified = 0, reminders = 0, fail_since = NULL WHERE id = ?', [$s['id']]);
 				event($rid, 'Секция ' . $s['name'] . ' снова работает');
 				if (!$muted) {
-					$recovered[$rid]['r'] = $r;
-					$recovered[$rid]['s'][] = $s;
+					$recovered[$uid][$rid]['r'] = $r;
+					$recovered[$uid][$rid]['s'][] = $s;
 				}
 				continue;
 			}
@@ -713,42 +735,48 @@ function check_alerts(): void
 				if ($now - (int)$s['fail_since'] >= $failAfter) {
 					q('UPDATE sections SET notified = 1, last_notify = ?, reminders = 0 WHERE id = ?', [$now, $s['id']]);
 					event($rid, 'Секция ' . $s['name'] . ' не работает');
-					$new[$rid]['r'] = $r;
-					$new[$rid]['s'][] = $s;
+					$new[$uid][$rid]['r'] = $r;
+					$new[$uid][$rid]['s'][] = $s;
 				}
 			} else {
 				$gap = (int)$s['reminders'] === 0 ? (int)cfg('remind_first', 10800) : (int)cfg('remind_every', 86400);
 				if ($now - (int)$s['last_notify'] >= $gap) {
 					q('UPDATE sections SET last_notify = ?, reminders = reminders + 1 WHERE id = ?', [$now, $s['id']]);
-					$remind[$rid]['r'] = $r;
-					$remind[$rid]['s'][] = $s;
+					$remind[$uid][$rid]['r'] = $r;
+					$remind[$uid][$rid]['s'][] = $s;
 				}
 			}
 		}
 	}
 
-	if ($offline) {
-		if (count($offline) === 1) {
-			$r = $offline[0];
-			notify_admins(
+	foreach ($offline as $uid => $list) {
+		if (count($list) === 1) {
+			$r = $list[0];
+			notify_owner(
+				$uid,
 				'⚫ <b>' . h($r['name']) . '</b> не выходит на связь (последний раз ' . ago($r['last_seen']) . ')',
 				kb([[['📟 Роутер', 'r:' . $r['id']], ['🔕 Тишина 24ч', 'mu:' . $r['id']]]])
 			);
 		} else {
-			$lines = array_map(fn($r) => '• ' . h($r['name']) . ' — ' . ago($r['last_seen']), $offline);
-			notify_admins("⚫ <b>Не выходят на связь:</b>\n" . implode("\n", $lines), kb([[['📋 Роутеры', 'rl']]]));
+			$lines = array_map(fn($r) => '• ' . h($r['name']) . ' — ' . ago($r['last_seen']), $list);
+			notify_owner($uid, "⚫ <b>Не выходят на связь:</b>\n" . implode("\n", $lines), kb([[['📋 Роутеры', 'rl']]]));
 		}
 	}
-	send_section_alerts($new, '🔴 <b>Не работает</b>');
-	send_section_alerts($remind, '⏰ <b>Всё ещё не работает</b>');
-
-	foreach ($recovered as $rid => $x) {
-		$lines = array_map(fn($s) => '• ' . h($s['name']) . ($s['fail_since'] ? ' (не работала ' . dur($now - (int)$s['fail_since']) . ')' : ''), $x['s']);
-		notify_admins('✅ <b>' . h($x['r']['name']) . "</b>: снова работает\n" . implode("\n", $lines), kb([[['📟 Роутер', 'r:' . $rid]]]));
+	foreach ($new as $uid => $groups) {
+		send_section_alerts($uid, $groups, '🔴 <b>Не работает</b>');
+	}
+	foreach ($remind as $uid => $groups) {
+		send_section_alerts($uid, $groups, '⏰ <b>Всё ещё не работает</b>');
+	}
+	foreach ($recovered as $uid => $groups) {
+		foreach ($groups as $rid => $x) {
+			$lines = array_map(fn($s) => '• ' . h($s['name']) . ($s['fail_since'] ? ' (не работала ' . dur($now - (int)$s['fail_since']) . ')' : ''), $x['s']);
+			notify_owner($uid, '✅ <b>' . h($x['r']['name']) . "</b>: снова работает\n" . implode("\n", $lines), kb([[['📟 Роутер', 'r:' . $rid]]]));
+		}
 	}
 }
 
-function send_section_alerts(array $groups, string $title): void
+function send_section_alerts(int $uid, array $groups, string $title): void
 {
 	if (!$groups) {
 		return;
@@ -765,9 +793,10 @@ function send_section_alerts(array $groups, string $title): void
 			}
 		}
 		$buttons[] = [['📟 Роутер', 'r:' . $r['id']], ['🔕 Тишина 24ч', 'mu:' . $r['id']]];
-		notify_admins(
+		notify_owner(
+			$uid,
 			$title . ' — <b>' . h($r['name']) . "</b>\n" . implode("\n", $lines) .
-			(cfg('bot_token') ? "\n\n💡 Новый ключ можно просто переслать сюда — сообщением из бота ImpVPN." : ''),
+			(cfg('bot_token') && !$uid ? "\n\n💡 Новый ключ можно просто переслать сюда — сообщением из бота ImpVPN." : ''),
 			kb($buttons)
 		);
 		return;
@@ -779,5 +808,5 @@ function send_section_alerts(array $groups, string $title): void
 			$text .= "\n" . section_line($s);
 		}
 	}
-	notify_admins($text, kb([[['📋 Роутеры', 'rl']]]));
+	notify_owner($uid, $text, kb([[['📋 Роутеры', 'rl']]]));
 }

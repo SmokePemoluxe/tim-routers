@@ -35,6 +35,8 @@ try {
 		http_response_code(401);
 		out(['error' => 'unknown_token']);
 	}
+	// Дальше всё (журнал, уведомления) — от имени владельца роутера
+	set_uid(max(0, (int)$router['user_id']));
 
 	if ($action === 'sync') {
 		$in = json_decode($raw, true);

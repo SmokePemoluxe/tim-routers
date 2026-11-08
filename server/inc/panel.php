@@ -9,25 +9,53 @@ function panel_start(): void
 	header('X-Content-Type-Options: nosniff');
 	header('Referrer-Policy: same-origin');
 
-	// Сессии — 30 дней, в своей закрытой папке (на общем хостинге стандартные живут ~24 мин)
-	$dir = data_dir() . '/sessions';
+	// Сессии — 30 дней, в своей закрытой папке (на общем хостинге стандартные живут ~24 мин).
+	// У кабинета пользователей — своя папка, своё имя cookie и свой путь: вход в кабинет не открывает админку.
+	$dir = data_dir() . (is_service() ? '/sessions-svc' : '/sessions');
 	if (!is_dir($dir)) {
 		mkdir($dir, 0700, true);
 	}
 	session_save_path($dir);
 	ini_set('session.gc_maxlifetime', (string)(30 * 86400));
+	ini_set('session.use_strict_mode', '1');
+	if (is_service()) {
+		session_name('TRSVC');
+	}
 	session_set_cookie_params([
 		'lifetime' => 30 * 86400,
+		'path' => cookie_path(),
 		'httponly' => true,
 		'samesite' => 'Lax',
 		'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
 	]);
 	session_start();
+	if (empty($_SESSION['csrf'])) {
+		$_SESSION['csrf'] = bin2hex(random_bytes(16));
+	}
+	if (is_service() && !empty($_SESSION['uid'])) {
+		// Пароль сменили, «выйти везде», блокировка или удаление — сессия больше не действует
+		$u = get_user((int)$_SESSION['uid']);
+		if (!$u || $u['status'] !== 'active' || (int)$u['sess_ver'] !== (int)($_SESSION['ver'] ?? 0)) {
+			$_SESSION = ['csrf' => bin2hex(random_bytes(16))];
+		} else {
+			set_uid((int)$u['id']);
+			$GLOBALS['USER'] = $u;
+		}
+	}
 }
 
 function panel_authed(): bool
 {
-	return !empty($_SESSION['ok']);
+	return is_service() ? cur_uid() > 0 : !empty($_SESSION['ok']);
+}
+
+// Страница только для режима «сервис» или только для админки
+function only_mode(string $mode): void
+{
+	if (($mode === 'service') !== is_service()) {
+		http_response_code(404);
+		exit('Not found');
+	}
 }
 
 function panel_require(): void
@@ -56,7 +84,7 @@ function panel_header(string $title, bool $autoRefresh = false): void
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <?php if ($autoRefresh): ?><meta http-equiv="refresh" content="30"><?php endif; ?>
-<title><?= h($title) ?> — роутеры</title>
+<title><?= h($title) ?> — <?= is_service() ? h(svc()['name']) : 'роутеры' ?></title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-title" content="Роутеры">
@@ -80,7 +108,14 @@ function panel_header(string $title, bool $autoRefresh = false): void
 	button, .btn { cursor: pointer; padding: 6px 12px; border: 1px solid #c1c7d0; background: #fff; border-radius: 4px; font: inherit; color: inherit; text-decoration: none; display: inline-block; }
 	button.primary { background: #0c66e4; border-color: #0c66e4; color: #fff; font-weight: 600; }
 	button.danger { color: #c9372c; }
-	.login { max-width: 320px; margin: 80px auto; }
+	.login { max-width: 360px; margin: 60px auto; }
+	input[type=email] { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c1c7d0; border-radius: 4px; font: inherit; min-height: 34px; }
+	footer { max-width: 1100px; margin: 0 auto; padding: 10px 16px 24px; color: #626f86; font-size: 12px; }
+	footer a { color: #626f86; }
+	.badge { background: #c9372c; color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; font-weight: 700; }
+	.legal h3 { font-size: 15px; margin: 18px 0 6px; }
+	.legal p, .legal li { line-height: 1.55; }
+	.hp { position: absolute; left: -5000px; width: 1px; height: 1px; overflow: hidden; }
 	input[type=text], input[type=password], select, textarea { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c1c7d0; border-radius: 4px; font: inherit; }
 	textarea { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
 	label.field { display: block; margin: 8px 0 3px; font-weight: 600; font-size: 13px; }
@@ -113,8 +148,10 @@ function panel_header(string $title, bool $autoRefresh = false): void
 </head>
 <body>
 <header>
-	<span><b>🛰 Роутеры</b><?php if (panel_authed()): ?> &nbsp; <a href="index.php">Обзор</a> &nbsp; <a href="settings.php">⚙️ Настройки</a><?php endif; ?></span>
-	<?php if (panel_authed()): ?><a href="index.php?logout">выйти</a><?php endif; ?>
+	<span><b>🛰 <?= is_service() ? h(svc()['name']) : 'Роутеры' ?></b><?php if (panel_authed()): ?> &nbsp; <a href="index.php">Обзор</a>
+		<?php if (is_service()): ?> &nbsp; <a href="support.php">💬 Поддержка</a><?php else: $open = open_tickets_count(); ?> &nbsp; <a href="users.php">👥 Пользователи<?= $open ? ' <span class="badge">' . $open . '</span>' : '' ?></a><?php endif; ?>
+		 &nbsp; <a href="settings.php">⚙️ Настройки</a><?php endif; ?></span>
+	<?php if (panel_authed()): ?><span><?php if (is_service()): ?><span class="muted" style="color:#9fb0c4"><?= h(cur_user()['email'] ?? '') ?></span> &nbsp; <?php endif; ?><a href="index.php?logout=<?= h($_SESSION['csrf'] ?? '') ?>">выйти</a></span><?php endif; ?>
 </header>
 <main>
 <?php

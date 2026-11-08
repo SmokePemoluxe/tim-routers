@@ -39,6 +39,10 @@ function ua_human(string $ua): string
 // Город, страна, провайдер; кэш на сутки
 function ip_geo(string $ip): array
 {
+	// IP пользователей сервиса за границу (ip-api.com) не отправляем — так обещано в политике конфиденциальности
+	if (is_service() || cur_uid() > 0) {
+		return ['ts' => time(), 'text' => '', 'proxy' => false];
+	}
 	$cache = kv_get('geo_' . $ip);
 	if ($cache && time() - (int)$cache['ts'] < 86400) {
 		return $cache;
@@ -82,22 +86,33 @@ function who_text(bool $long = false): string
 function audit(string $what): void
 {
 	event(null, 'Панель: ' . $what . ' (IP ' . client_ip() . ')');
-	notify_admins('⚙️ <b>Изменение в панели:</b> ' . h($what) . "\n" . h(who_text()));
+	notify_owner(cur_uid(), '⚙️ <b>Изменение в ' . (is_service() ? 'кабинете' : 'панели') . ':</b> ' . h($what) . "\n" . h(who_text()));
 }
 
 // ---------- Устройства ----------
 
 const DEVICE_COOKIE = 'tr_dev';
+
+// У кабинета пользователей — своя «метка устройства», только для его адреса
+function device_cookie(): string
+{
+	return is_service() ? 'trs_dev' : DEVICE_COOKIE;
+}
+
+function cookie_path(): string
+{
+	return is_service() ? rtrim((string)parse_url(service_url(), PHP_URL_PATH), '/') . '/' : '/';
+}
 const TRUST_DAYS = 30;
 
 function device_id(): string
 {
-	$id = (string)($_COOKIE[DEVICE_COOKIE] ?? '');
+	$id = (string)($_COOKIE[device_cookie()] ?? '');
 	if (!preg_match('/^[a-f0-9]{32}$/', $id)) {
 		$id = bin2hex(random_bytes(16));
 	}
-	setcookie(DEVICE_COOKIE, $id, [
-		'expires' => time() + 400 * 86400, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax',
+	setcookie(device_cookie(), $id, [
+		'expires' => time() + 400 * 86400, 'path' => cookie_path(), 'httponly' => true, 'samesite' => 'Lax',
 		'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
 	]);
 	return $id;
@@ -105,7 +120,7 @@ function device_id(): string
 
 function devices(): array
 {
-	return kv_get('devices', []);
+	return kv_get(okey('devices'), []);
 }
 
 function device_known(string $id): ?array
@@ -127,7 +142,7 @@ function device_remember(string $id, bool $trust): bool
 		$d['trusted_until'] = time() + TRUST_DAYS * 86400;
 	}
 	$all[$k] = $d;
-	kv_set('devices', $all);
+	kv_set(okey('devices'), $all);
 	return $new;
 }
 
@@ -140,7 +155,7 @@ function device_trusted(string $id): bool
 // Забыть все устройства (например, если подозреваете кражу пароля)
 function devices_forget(): void
 {
-	kv_set('devices', []);
+	kv_set(okey('devices'), []);
 }
 
 // ---------- Блокировка подбора ----------
@@ -157,7 +172,7 @@ function login_locked(): int
 	return 0;
 }
 
-function login_failed(string $what): void
+function login_failed(string $what, int $uid = 0): void
 {
 	$k = 'fail_' . client_ip();
 	$f = kv_get($k);
@@ -168,8 +183,8 @@ function login_failed(string $what): void
 	$f['ts'] = time();
 	kv_set($k, $f);
 	event(null, "Неудачный вход ($what), IP " . client_ip());
-	if ($f['n'] === FAIL_LIMIT) {
-		notify_admins('🚨 <b>Подбор пароля к панели!</b> ' . FAIL_LIMIT . " неудачных попыток подряд ($what). Вход с этого IP заблокирован на " . (FAIL_LOCK / 60) . " мин.\n" . h(who_text(true)));
+	if ($f['n'] === FAIL_LIMIT && (!is_service() || $uid)) {
+		notify_owner($uid, '🚨 <b>Подбор пароля к панели!</b> ' . FAIL_LIMIT . " неудачных попыток подряд ($what). Вход с этого IP заблокирован на " . (FAIL_LOCK / 60) . " мин.\n" . h(who_text(true)));
 	}
 }
 
@@ -182,7 +197,16 @@ function login_fail_reset(): void
 
 function totp_settings(): array
 {
-	return kv_get('totp', []) + ['enabled' => false, 'secret' => '', 'backup' => []];
+	$t = (kv_get(okey('totp'), []) ?: []) + ['enabled' => false, 'secret' => '', 'backup' => []];
+	$t['secret'] = secret_dec((string)$t['secret']);
+	return $t;
+}
+
+// Секрет двухфакторки хранится зашифрованным (ключ — в config.php, не в базе)
+function totp_save(array $t): void
+{
+	$t['secret'] = secret_enc((string)($t['secret'] ?? ''));
+	kv_set(okey('totp'), $t);
 }
 
 function base32_encode(string $bin): string
@@ -233,10 +257,10 @@ function totp_check(string $input): bool
 		foreach ([0, -1, 1] as $d) {
 			if (hash_equals(totp_code($t['secret'], $step + $d), $code)) {
 				// Один и тот же код дважды не принимаем
-				if ((int)kv_get('totp_last_step', 0) >= $step + $d) {
+				if ((int)kv_get(okey('totp_last_step'), 0) >= $step + $d) {
 					return false;
 				}
-				kv_set('totp_last_step', $step + $d);
+				kv_set(okey('totp_last_step'), $step + $d);
 				return true;
 			}
 		}
@@ -245,8 +269,8 @@ function totp_check(string $input): bool
 	$hash = hash('sha256', strtolower($code));
 	if (in_array($hash, $t['backup'], true)) {
 		$t['backup'] = array_values(array_diff($t['backup'], [$hash]));
-		kv_set('totp', $t);
-		notify_admins('🔑 Для входа в панель использован резервный код. Осталось: ' . count($t['backup']) . ".\n" . h(who_text()));
+		totp_save($t);
+		notify_owner(cur_uid(), '🔑 Для входа использован резервный код. Осталось: ' . count($t['backup']) . ".\n" . h(who_text()));
 		return true;
 	}
 	return false;
@@ -277,33 +301,46 @@ function totp_new_backup(): array
 	}
 	$t = totp_settings();
 	$t['backup'] = array_map(fn($c) => hash('sha256', $c), $codes);
-	kv_set('totp', $t);
+	totp_save($t);
 	return $codes;
 }
 
 function totp_uri(string $secret): string
 {
 	$host = parse_url((string)cfg('base_url'), PHP_URL_HOST) ?: 'panel';
-	return 'otpauth://totp/' . rawurlencode('Роутеры:' . $host) . '?secret=' . $secret . '&issuer=' . rawurlencode('Роутеры');
+	$label = is_service() ? (svc()['name'] . ':' . ((cur_user()['email'] ?? '') ?: $host)) : 'Роутеры:' . $host;
+	return 'otpauth://totp/' . rawurlencode($label) . '?secret=' . $secret . '&issuer=' . rawurlencode(is_service() ? svc()['name'] : 'Роутеры');
 }
 
 // ---------- Вход ----------
 
-function complete_login(bool $passed2fa): void
+// $uid — пользователь сервиса (в админке 0)
+function complete_login(bool $passed2fa, int $uid = 0): void
 {
 	session_regenerate_id(true);
-	$_SESSION['ok'] = true;
+	if ($uid) {
+		$u = get_user($uid);
+		$_SESSION['uid'] = $uid;
+		$_SESSION['ver'] = (int)$u['sess_ver'];
+		set_uid($uid);
+		$GLOBALS['USER'] = $u;
+		q('UPDATE users SET last_login = ?, last_ip = ? WHERE id = ?', [time(), client_ip(), $uid]);
+	} else {
+		$_SESSION['ok'] = true;
+	}
 	$_SESSION['csrf'] = bin2hex(random_bytes(16));
-	unset($_SESSION['pw_ok']);
+	unset($_SESSION['pw_ok'], $_SESSION['pw_uid']);
 	login_fail_reset();
 	$dev = device_id();
 	$new = device_remember($dev, $passed2fa);
-	event(null, 'Вход в панель' . ($new ? ' с нового устройства' : '') . ', IP ' . client_ip());
+	$where = $uid ? 'кабинет' : 'панель';
+	event(null, 'Вход в ' . $where . ($new ? ' с нового устройства' : '') . ', IP ' . client_ip());
 	$tfa = totp_settings()['enabled'] ? ($passed2fa ? 'код подтверждён' : 'доверенное устройство, код не спрашивался') : 'не включена';
-	notify_admins(
-		($new ? '🆕🔐 <b>Вход в панель с НОВОГО устройства</b>' : '🔐 <b>Вход в панель</b>') . "\n" .
+	notify_owner(
+		$uid,
+		($new ? '🆕🔐 <b>Вход в ' . $where . ' с НОВОГО устройства</b>' : '🔐 <b>Вход в ' . $where . '</b>') . "\n" .
 		h(who_text(true)) . "\nДвухфакторная защита: " . $tfa .
-		"\n\nЕсли это были не вы — смените пароль панели и нажмите «Забыть все устройства» в настройках."
+		"\n\nЕсли это были не вы — смените пароль и нажмите «Забыть все устройства» в настройках."
 	);
 }
 
@@ -311,26 +348,27 @@ function complete_login(bool $passed2fa): void
 
 const INVITE_TTL = 86400;
 
-function invite_create(): string
+// Код приглашения знает, чей будет роутер ($uid: 0 — администратор)
+function invite_create(int $uid = 0): string
 {
 	$code = bin2hex(random_bytes(6));
 	$all = array_filter(kv_get('invites', []), fn($i) => $i['expires'] > time() && empty($i['used']));
-	$all[hash('sha256', $code)] = ['created' => time(), 'expires' => time() + INVITE_TTL, 'used' => 0];
+	$all[hash('sha256', $code)] = ['created' => time(), 'expires' => time() + INVITE_TTL, 'used' => 0, 'uid' => $uid];
 	kv_set('invites', $all);
 	return $code;
 }
 
-// true — код действителен (и теперь израсходован)
-function invite_use(string $code, int $routerId): bool
+// Владелец будущего роутера, если код действителен (код при этом сгорает); null — код не подошёл
+function invite_use(string $code): ?int
 {
 	$all = kv_get('invites', []);
 	$k = hash('sha256', $code);
-	if (!isset($all[$k]) || $all[$k]['expires'] < time() || !empty($all[$k]['used'])) {
-		return false;
+	if ($code === '' || !isset($all[$k]) || $all[$k]['expires'] < time() || !empty($all[$k]['used'])) {
+		return null;
 	}
-	$all[$k]['used'] = $routerId ?: 1;
+	$all[$k]['used'] = time();
 	kv_set('invites', $all);
-	return true;
+	return (int)($all[$k]['uid'] ?? 0);
 }
 
 // ---------- Резервные копии базы (раз в сутки, храним 14) ----------

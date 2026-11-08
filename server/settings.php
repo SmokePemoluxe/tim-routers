@@ -3,6 +3,7 @@
 
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/panel.php';
+require __DIR__ . '/inc/account.php';
 
 panel_start();
 panel_require();
@@ -15,7 +16,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 	if (!csrf_ok()) {
 		$msg = ['err', 'Форма устарела — обновите страницу.'];
 	} else {
-		switch ($_POST['action'] ?? '') {
+		$act = (string)($_POST['action'] ?? '');
+		if (is_service() && in_array($act, ['save_token', 'find', 'save_peers', 'toggle', 'test', 'forget'], true)) {
+			$act = '';
+		}
+		if (is_service() && ($m = settings_service_action($act))) {
+			$msg = $m;
+			$act = '';
+		}
+		switch ($act) {
 			case 'save_token':
 				$token = trim((string)($_POST['token'] ?? ''));
 				$r = $token !== '' ? vk_api('groups.getById', [], $token) : ['ok' => false, 'error' => 'вставьте ключ'];
@@ -130,7 +139,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 					$msg = ['err', 'Код не подошёл. Проверьте, что время на телефоне точное, и введите свежий код.'];
 					break;
 				}
-				kv_set('totp', ['enabled' => true, 'secret' => $secret, 'backup' => []]);
+				totp_save(['enabled' => true, 'secret' => $secret, 'backup' => []]);
 				$_SESSION['totp_codes'] = totp_new_backup();
 				unset($_SESSION['totp_new']);
 				device_remember(device_id(), true);
@@ -146,7 +155,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 				}
 				if ($_POST['action'] === 'totp_off') {
 					audit('ВЫКЛЮЧЕНА двухфакторная защита входа');
-					kv_set('totp', ['enabled' => false, 'secret' => '', 'backup' => []]);
+					totp_save(['enabled' => false, 'secret' => '', 'backup' => []]);
 					$msg = ['ok', 'Двухфакторная защита выключена.'];
 				} else {
 					$_SESSION['totp_codes'] = totp_new_backup();
@@ -159,10 +168,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 			case 'devices_forget':
 				audit('забыты все устройства: на каждом снова спросят пароль и код');
 				devices_forget();
-				$cur = session_id();
-				foreach (glob(data_dir() . '/sessions/sess_*') ?: [] as $f) {
-					if (basename($f) !== 'sess_' . $cur) {
-						@unlink($f);
+				if (is_service()) {
+					// Все сессии кабинета, кроме этой, перестают действовать
+					q('UPDATE users SET sess_ver = sess_ver + 1 WHERE id = ?', [cur_uid()]);
+					$_SESSION['ver'] = (int)val('SELECT sess_ver FROM users WHERE id = ?', [cur_uid()]);
+				} else {
+					$cur = session_id();
+					foreach (glob(data_dir() . '/sessions/sess_*') ?: [] as $f) {
+						if (basename($f) !== 'sess_' . $cur) {
+							@unlink($f);
+						}
 					}
 				}
 				device_remember(device_id(), totp_settings()['enabled']);
@@ -172,8 +187,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 	}
 }
 
-// Скачать резервную копию базы
-if (isset($_GET['backup'])) {
+// Скачать резервную копию базы (только админка)
+if (!is_service() && isset($_GET['backup'])) {
 	$name = basename((string)$_GET['backup']);
 	$file = data_dir() . '/backups/' . $name;
 	if (!preg_match('/^routers-\d{4}-\d{2}-\d{2}\.sqlite$/', $name) || !is_file($file)) {
@@ -197,8 +212,10 @@ panel_header('Настройки');
 	<h2 style="font-size:20px;margin:4px 0 12px">⚙️ Настройки</h2>
 	<?php if ($msg): ?><div class="notice <?= h($msg[0]) ?>"><?= h($msg[1]) ?></div><?php endif; ?>
 
+	<?php if (is_service()) { settings_service_cards(); } else { ?>
 	<div class="card">
 		<h2>🔔 Уведомления во ВКонтакте</h2>
+		<p class="muted">Этот же бот пишет пользователям сервиса (они привязывают свою страницу кодом в кабинете). Сообщения пользователей сообществу — это только коды привязки; уведомления об их роутерах вам не приходят.</p>
 		<p>
 			Состояние:
 			<?php if ($vk['enabled'] && $vk['peers']): ?>
@@ -260,6 +277,7 @@ panel_header('Настройки');
 			</div>
 		<?php endif; ?>
 	</div>
+	<?php } ?>
 
 	<div class="card">
 		<h2>🔐 Двухфакторная защита (Google Authenticator)</h2>
@@ -302,7 +320,7 @@ panel_header('Настройки');
 
 	<div class="card">
 		<h2>💻 Устройства, с которых входили</h2>
-		<?php $myKey = hash('sha256', (string)($_COOKIE[DEVICE_COOKIE] ?? '')); $devs = devices(); uasort($devs, fn($a, $b) => $b['last'] <=> $a['last']); ?>
+		<?php $myKey = hash('sha256', (string)($_COOKIE[device_cookie()] ?? '')); $devs = devices(); uasort($devs, fn($a, $b) => $b['last'] <=> $a['last']); ?>
 		<?php foreach ($devs as $k => $d): ?>
 			<div class="item">
 				<b><?= h($d['ua']) ?></b><?= $k === $myKey ? ' <span class="muted">— это устройство</span>' : '' ?><br>
@@ -317,6 +335,7 @@ panel_header('Настройки');
 		<p class="muted">Нажмите, если подозреваете, что пароль украли: все входы, кроме этого, завершатся. Затем смените пароль панели.</p>
 	</div>
 
+	<?php if (!is_service()): ?>
 	<div class="card">
 		<h2>💾 Резервные копии базы</h2>
 		<p class="muted">Делаются автоматически раз в сутки (если на хостинге настроен cron), хранятся 14 последних. В копии — роутеры, настройки панели и ключ сообщества ВК, поэтому храните скачанные копии в надёжном месте.</p>
@@ -326,5 +345,6 @@ panel_header('Настройки');
 		<?php endforeach; ?>
 		<?php if (!$bk): ?><p class="muted">Копий пока нет — первая появится при ближайшем запуске cron.</p><?php endif; ?>
 	</div>
+	<?php endif; ?>
 <?php
 panel_footer();

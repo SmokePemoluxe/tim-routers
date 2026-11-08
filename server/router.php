@@ -9,9 +9,10 @@ panel_require();
 
 const MIN_AGENT = '2.0';
 const SUB_OPTS_AGENT = '2.2'; // выбор стран, закрепление, переключение сервера
+const SUB_STICKY_AGENT = '2.3'; // «держаться за текущий сервер»
 
 $rid = (int)($_GET['id'] ?? 0);
-$router = get_router($rid);
+$router = router_for_page($rid); // чужой роутер — «не найден»
 if (!$router || $router['status'] !== 'active') {
 	panel_header('Роутер не найден');
 	echo '<div class="card">Роутер не найден. <a href="index.php">К списку</a></div>';
@@ -21,6 +22,18 @@ if (!$router || $router['status'] !== 'active') {
 $info = rinfo($router);
 $agentOk = version_compare((string)($info['agent'] ?? '0'), MIN_AGENT, '>=');
 $subOptsOk = version_compare((string)($info['agent'] ?? '0'), SUB_OPTS_AGENT, '>=');
+$subStickyOk = version_compare((string)($info['agent'] ?? '0'), SUB_STICKY_AGENT, '>=');
+
+// Кто смотрит: владелец; администратор с разрешением пользователя (поддержка); администратор без разрешения — только просмотр
+$acc = router_access($router);
+$owner = (int)$router['user_id'] > 0 ? get_user((int)$router['user_id']) : null;
+$readonlyWhy = '';
+if ($acc === 'view') {
+	$readonlyWhy = 'Роутер пользователя ' . ($owner['email'] ?? '#' . $router['user_id']) . ' — только просмотр. Менять настройки и запрашивать отчёт можно, когда пользователь откроет доступ поддержке (в своих настройках).';
+} elseif (is_service() && !user_can_manage(cur_user())) {
+	$readonlyWhy = 'Подписка не активна — роутер работает как настроен, но менять настройки нельзя. Как продлить — в «Настройках».';
+}
+$canEdit = $readonlyWhy === '';
 
 // ---------- Модель секций для формы ----------
 
@@ -51,6 +64,7 @@ function sections_from_db(int $rid): array
 			'sub_fallback' => (string)($d['sub']['fallback'] ?? 'any'),
 			'sub_pin' => (string)($d['sub']['pin'] ?? ''),
 			'sub_policy' => (string)($d['sub']['policy'] ?? '6h'),
+			'sub_sticky' => !empty($d['sub']['sticky']),
 			'domains' => implode("\n", $d['domains'] ?? []),
 			'subnets' => implode("\n", $d['subnets'] ?? []),
 			'community' => $d['community'] ?? [],
@@ -95,6 +109,7 @@ function sections_from_post(int $rid): array
 			'sub_fallback' => ($p['sub_fallback'] ?? '') === 'strict' ? 'strict' : 'any',
 			'sub_pin' => trim((string)($p['sub_pin'] ?? '')),
 			'sub_policy' => in_array($p['sub_policy'] ?? '', ['6h', '24h', 'dead', 'off'], true) ? $p['sub_policy'] : '6h',
+			'sub_sticky' => !empty($p['sub_sticky']),
 			'domains' => (string)($p['domains'] ?? ''),
 			'subnets' => (string)($p['subnets'] ?? ''),
 			'community' => array_values(array_filter((array)($p['community'] ?? []), fn($l) => is_string($l) && preg_match('/^[a-z0-9_]{1,30}$/', $l))),
@@ -281,6 +296,7 @@ function build_payload(array $sections, array $settings): array
 			'sub_fallback' => $s['sub_fallback'],
 			'sub_pin' => $subOn ? $s['sub_pin'] : '',
 			'sub_policy' => $s['sub_policy'],
+			'sub_sticky' => $subOn && !empty($s['sub_sticky']),
 			'sub_off' => $subOff,
 			'domains' => $domains,
 			'subnets' => $subnets,
@@ -301,6 +317,10 @@ function report_files(int $rid): array
 }
 
 if (isset($_GET['dl'])) {
+	if ($acc === 'view') {
+		http_response_code(403);
+		exit('Нет доступа');
+	}
 	$name = basename((string)$_GET['dl']);
 	$file = data_dir() . '/reports/' . $name;
 	if (!preg_match('/^router-' . $rid . '-[0-9-]+\.txt$/', $name) || !is_file($file)) {
@@ -319,7 +339,13 @@ $errors = [];
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 	if (!csrf_ok()) {
 		$errors[] = 'Форма устарела — обновите страницу и повторите.';
+	} elseif (!$canEdit) {
+		$errors[] = $readonlyWhy;
 	} else {
+		if ($acc === 'support') {
+			// Пользователь видит в своём журнале, что делала поддержка
+			event($rid, 'Поддержка сервиса: действие «' . mb_substr((string)$_POST['action'], 0, 60) . '»');
+		}
 		// «🔄 Обновить список серверов» у секции с подпиской
 		if (preg_match('/^sub_refresh:([A-Za-z][A-Za-z0-9_]{0,29})$/', (string)$_POST['action'], $m)) {
 			queue_task($rid, 'refresh_subscription', ['section' => $m[1]]);
@@ -361,7 +387,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 				$_SESSION['flash'] = ['ok', 'Роутер пришлёт отчёт при следующем выходе на связь (до 2 минут). Ссылка для скачивания появится в блоке «Управление».'];
 				break;
 			case 'update':
-				$ref = trim((string)($_POST['ref'] ?? ''));
+				$ref = (is_service() || $acc !== 'own') ? 'main' : trim((string)($_POST['ref'] ?? ''));
 				if (preg_match('/^[A-Za-z0-9._-]{1,40}$/', $ref)) {
 					queue_task($rid, 'update', ['ref' => $ref]);
 					audit('обновление скриптов до «' . $ref . '» на роутере «' . $router['name'] . '»');
@@ -404,6 +430,8 @@ $sections = sections_from_db($rid);
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !isset($_POST['action'])) {
 	if (!csrf_ok()) {
 		$errors[] = 'Форма устарела — обновите страницу и повторите.';
+	} elseif (!$canEdit) {
+		$errors[] = $readonlyWhy;
 	} elseif (!$agentOk) {
 		$errors[] = 'Агент на роутере устарел — сначала обновите скрипты.';
 	} else {
@@ -417,6 +445,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !isset($_POST['action'])) {
 		if (!$errors) {
 			// Неотправленная предыдущая версия больше не нужна
 			q("UPDATE tasks SET status = 'failed', done_at = ?, result = 'заменено более новой отправкой', payload = '{}' WHERE router_id = ? AND type = 'apply_config' AND status = 'queued'", [time(), $rid]);
+			if ($acc === 'support') {
+				event($rid, 'Поддержка сервиса отправила настройки на роутер');
+			}
 			queue_task($rid, 'apply_config', $payload);
 			event($rid, 'Настройки отправлены с сайта');
 			audit('отправлены настройки podkop на роутер «' . $router['name'] . '»: ' . task_label('apply_config', $payload));
@@ -446,7 +477,7 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 	$isNew = $s['orig'] === '';
 	$keyEditable = $isNew || in_array($s['config'], ['url', ''], true);
 	$all = array_values(array_unique(array_merge(KNOWN_LISTS, $s['community'])));
-	global $subOptsOk;
+	global $subOptsOk, $subStickyOk;
 	?>
 	<div class="section<?= $s['delete'] ? ' deleted' : '' ?>" data-section>
 		<input type="hidden" name="sections[<?= $i ?>][orig]" value="<?= h($s['orig']) ?>">
@@ -528,6 +559,11 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 									<option value="<?= h($s['sub_pin']) ?>" selected><?= h(($s['sub']['pin_name'] ?? '') ?: $s['sub_pin']) ?> (нет в подписке)</option>
 								<?php endif; ?>
 							</select>
+							<?php if ($subStickyOk): ?>
+								<label style="display:block;margin-top:8px"><input type="checkbox" name="sections[<?= $i ?>][sub_sticky]" value="1" <?= !empty($s['sub_sticky']) ? 'checked' : '' ?>> <b>Держаться за текущий сервер</b> — не менять его на более быстрый, пока он отвечает. Перестал отвечать — взять другой по правилам выше (страны, что делать при отказе).</label>
+							<?php else: ?>
+								<div class="muted" style="margin-top:6px">«Держаться за текущий сервер» появится после обновления скриптов роутера (нужен агент <?= SUB_STICKY_AGENT ?>).</div>
+							<?php endif; ?>
 							<?php if (!$srvAll): ?><div class="muted">Список серверов появится, когда роутер скачает подписку.</div><?php endif; ?>
 							<label class="field">Когда обновлять список серверов</label>
 							<select name="sections[<?= $i ?>][sub_policy]">
@@ -601,6 +637,8 @@ panel_header($router['name']);
 	<h2 style="font-size:20px;margin:4px 0 2px"><?= router_icon($router) ?> <?= h($router['name']) ?></h2>
 	<p class="muted" style="margin-top:0"><?= router_hw_line($info) ?> · на связи <?= ago($router['last_seen']) ?> · данные — на момент последней связи</p>
 
+	<?php if ($readonlyWhy): ?><div class="notice">🔒 <?= h($readonlyWhy) ?></div><?php endif; ?>
+	<?php if ($acc === 'support'): ?><div class="notice">🛟 Роутер пользователя <b><?= h($owner['email'] ?? '') ?></b>: доступ поддержки открыт до <?= date('d.m H:i', (int)$owner['support_until']) ?>. Все ваши действия видны пользователю в его журнале.</div><?php endif; ?>
 	<?php if ($flash): ?><div class="notice <?= h($flash[0]) ?>"><?= h($flash[1]) ?></div><?php endif; ?>
 	<?php if ($errors): ?>
 		<div class="notice err"><b>Не отправлено — исправьте:</b><ul style="margin:6px 0 0"><?php foreach ($errors as $e): ?><li><?= h($e) ?></li><?php endforeach; ?></ul></div>
@@ -621,6 +659,7 @@ panel_header($router['name']);
 	<details class="card" <?= $flash ? 'open' : '' ?>>
 		<summary><h2 style="display:inline">🛠 Управление</h2> <span class="muted">имя, отчёт, обновление, удаление, история</span></summary>
 
+		<fieldset <?= $canEdit ? '' : 'disabled' ?> style="border:0;padding:0;margin:0">
 		<form method="post" class="row" style="margin-top:10px">
 			<?= csrf_field() ?>
 			<input type="text" name="name" value="<?= h($router['name']) ?>" style="flex:1;min-width:160px">
@@ -631,7 +670,7 @@ panel_header($router['name']);
 			<form method="post"><?= csrf_field() ?><button name="action" value="report">📄 Запросить отчёт</button></form>
 			<form method="post" class="row">
 				<?= csrf_field() ?>
-				<input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег, например v1.4">
+				<?php if (!is_service() && $acc === 'own'): ?><input type="text" name="ref" value="main" style="width:90px" title="Версия с GitHub: main или тег, например v1.4"><?php endif; ?>
 				<button name="action" value="update">⬆️ Обновить скрипты</button>
 			</form>
 			<form method="post" onsubmit="return confirm('Обновить podkop на этом роутере? Откатить обновление podkop нельзя.')">
@@ -641,8 +680,9 @@ panel_header($router['name']);
 				<?= csrf_field() ?><button name="action" value="delete" class="danger">🗑 Удалить из системы</button>
 			</form>
 		</div>
+		</fieldset>
 
-		<?php if ($reports = report_files($rid)): ?>
+		<?php if ($acc !== 'view' && ($reports = report_files($rid))): ?>
 			<p style="margin-bottom:4px"><b>Отчёты:</b></p>
 			<?php foreach ($reports as $f): ?>
 				<div><a href="router.php?id=<?= $rid ?>&dl=<?= urlencode(basename($f)) ?>">📄 <?= h(basename($f)) ?></a></div>
@@ -667,6 +707,7 @@ panel_header($router['name']);
 
 	<form method="post" id="cfg">
 		<?= csrf_field() ?>
+		<fieldset <?= $canEdit ? '' : 'disabled' ?> style="border:0;padding:0;margin:0;min-width:0">
 		<div class="card">
 			<h2>DNS podkop</h2>
 			<div class="grid" style="grid-template-columns: 1fr 1fr 1fr">
@@ -698,9 +739,10 @@ panel_header($router['name']);
 			<a class="btn" href="router.php?id=<?= $rid ?>">Сбросить изменения</a>
 			<span class="muted">&nbsp; Роутер применит всё разом, проверит новые ключи (неработающий — вернёт прежний) и на ~10 с переподключит устройства.</span>
 		</div>
+		</fieldset>
 	</form>
 
-	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'sub' => null, 'source' => 'key', 'sub_url' => '', 'sub_exclude' => 'Россия', 'sub_only' => '', 'sub_fallback' => 'any', 'sub_pin' => '', 'sub_policy' => '6h', 'interface' => '', 'dr_enabled' => false, 'dr_type' => 'doh', 'dr_server' => '1.1.1.1', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames, $vpnIfaces); ?></template>
+	<template id="tpl"><?php render_section(9999, ['orig' => '', 'name' => '', 'type' => 'proxy', 'config' => 'url', 'status' => '', 'detour' => '', 'cur_detour' => '', 'sub' => null, 'source' => 'key', 'sub_url' => '', 'sub_exclude' => 'Россия', 'sub_only' => '', 'sub_fallback' => 'any', 'sub_pin' => '', 'sub_policy' => '6h', 'sub_sticky' => false, 'interface' => '', 'dr_enabled' => false, 'dr_type' => 'doh', 'dr_server' => '1.1.1.1', 'key' => '', 'domains' => '', 'subnets' => '', 'community' => [], 'remote' => '', 'delete' => false], $proxyNames, $vpnIfaces); ?></template>
 
 	<datalist id="vpn-ifaces"><?php foreach ($vpnIfaces as $v): ?><option value="<?= h($v) ?>"><?php endforeach; ?></datalist>
 
