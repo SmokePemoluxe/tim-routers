@@ -222,12 +222,15 @@ function find_same_router(array $info, int $exceptId = 0, ?int $uid = null): ?ar
 		$uid = $exceptId ? (int)val('SELECT user_id FROM routers WHERE id = ?', [$exceptId]) : cur_uid();
 	}
 	foreach (['mac_wan', 'mac_lan'] as $k) {
+		// У роутеров пользователей MAC хранится только хэшем — сравниваем и так, и так
 		$mac = strtolower((string)($info[$k] ?? ''));
-		if (!preg_match('/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/', $mac)) {
+		$hash = preg_match('/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/', $mac) ? mac_hash($mac) : (string)($info[$k . '_h'] ?? '');
+		if ($hash === '') {
 			continue;
 		}
-		foreach (rows('SELECT * FROM routers WHERE id != ? AND user_id = ? AND info LIKE ? ORDER BY id DESC', [$exceptId, $uid, '%' . $mac . '%']) as $r) {
-			if (strtolower((string)(rinfo($r)[$k] ?? '')) === $mac) {
+		foreach (rows('SELECT * FROM routers WHERE id != ? AND user_id = ? AND (info LIKE ? OR info LIKE ?) ORDER BY id DESC', [$exceptId, $uid, '%' . ($mac ?: $hash) . '%', '%' . $hash . '%']) as $r) {
+			$ri = rinfo($r);
+			if (($mac !== '' && strtolower((string)($ri[$k] ?? '')) === $mac) || ($ri[$k . '_h'] ?? '') === $hash) {
 				return $r;
 			}
 		}
@@ -253,6 +256,57 @@ function podkop_outdated(string $v): bool
 {
 	$latest = podkop_latest();
 	return $v !== '' && $latest !== '' && version_compare(ltrim($v, 'v'), ltrim($latest, 'v'), '<');
+}
+
+// Последние версии агента и сторожа на GitHub (из cron не чаще раза в 6 часов)
+function scripts_latest(bool $refresh = false): array
+{
+	$c = kv_get('scripts_latest', ['agent' => '', 'watchdog' => '', 'ts' => 0]);
+	if ($refresh && time() - (int)$c['ts'] > 6 * 3600) {
+		foreach (['agent' => 'tim-agent.sh', 'watchdog' => 'inet-watchdog.sh'] as $k => $f) {
+			$ch = curl_init('https://raw.githubusercontent.com/' . GITHUB_REPO . '/main/router/' . $f);
+			curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15, CURLOPT_RANGE => '0-4000']);
+			if (preg_match('/^VERSION="([0-9.]+)"/m', (string)curl_exec($ch), $m)) {
+				$c[$k] = $m[1];
+			}
+		}
+		$c['ts'] = time();
+		kv_set('scripts_latest', $c);
+	}
+	return $c;
+}
+
+// Что на роутере устарело: ['агент 2.1 (есть 2.4)', …]
+function router_outdated(array $info): array
+{
+	$l = scripts_latest();
+	$out = [];
+	$a = (string)($info['agent'] ?? '');
+	if ($a !== '' && $l['agent'] !== '' && version_compare($a, $l['agent'], '<')) {
+		$out[] = 'агент ' . $a . ' (есть ' . $l['agent'] . ')';
+	}
+	$w = (string)($info['watchdog']['version'] ?? '');
+	if ($w !== '' && $l['watchdog'] !== '' && version_compare($w, $l['watchdog'], '<')) {
+		$out[] = 'сторож ' . $w . ' (есть ' . $l['watchdog'] . ')';
+	}
+	$p = (string)($info['podkop'] ?? '');
+	if ($p !== '' && podkop_outdated($p)) {
+		$out[] = 'podkop ' . $p . ' (есть ' . podkop_latest() . ')';
+	}
+	return $out;
+}
+
+// Предупреждения о самом роутере: мало места, мало памяти
+function router_warnings(array $info): array
+{
+	$w = [];
+	if (isset($info['flash_free']) && (int)$info['flash_free'] < 1024) {
+		$w[] = 'во флеш-памяти свободно меньше 1 МБ — обновления могут не установиться';
+	}
+	if (isset($info['mem_free']) && (int)$info['mem_free'] > 0 && (int)$info['mem_free'] < 10) {
+		$w[] = 'свободной памяти меньше 10%';
+	}
+	return $w;
 }
 
 function router_hw_line(array $info): string
@@ -431,9 +485,50 @@ function client_ip(): string
 	return (string)($_SERVER['REMOTE_ADDR'] ?? '');
 }
 
-function clean_info($info): array
+function clean_info($info, int $uid = 0): array
 {
-	return is_array($info) ? $info : [];
+	$info = is_array($info) ? $info : [];
+	if ($uid > 0) {
+		// Роутеры пользователей: адрес в локальной сети не храним, MAC — только как хэш
+		// (по нему видно «это железо уже было», но сам адрес не виден никому)
+		foreach (['mac_wan', 'mac_lan'] as $k) {
+			$mac = strtolower((string)($info[$k] ?? ''));
+			unset($info[$k]);
+			if (preg_match('/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/', $mac)) {
+				$info[$k . '_h'] = mac_hash($mac);
+			}
+		}
+		unset($info['lan_ip']);
+	}
+	return $info;
+}
+
+function mac_hash(string $mac): string
+{
+	return substr(hash('sha256', 'mac:' . strtolower($mac)), 0, 32);
+}
+
+// Внешний IP роутера пользователя не храним
+function router_ip(int $uid): string
+{
+	return $uid > 0 ? '' : client_ip();
+}
+
+// Включён ли сервис на роутере (сторож и автоматика подписок): у пользователя — только при активной подписке
+function svc_flag(array $r): array
+{
+	$uid = (int)$r['user_id'];
+	if ($uid <= 0) {
+		return ['svc' => 'on'];
+	}
+	$u = get_user($uid);
+	if (!$u || $u['status'] !== 'active') {
+		return ['svc' => 'off', 'svc_reason' => 'кабинет заблокирован'];
+	}
+	if (!user_plan($u)['active']) {
+		return ['svc' => 'off', 'svc_reason' => 'подписка не активна — продлите её в кабинете ' . service_url() . '/'];
+	}
+	return ['svc' => 'on'];
 }
 
 function api_register(array $in): array
@@ -469,8 +564,8 @@ function api_register(array $in): array
 	$token = bin2hex(random_bytes(24));
 	$name = mb_substr(trim((string)($info['hostname'] ?? '')), 0, 40) ?: 'Новый роутер';
 	q('INSERT INTO routers (token_hash, name, status, created_at, last_seen, ip, info, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
-		hash('sha256', $token), $name, 'pending', time(), time(), client_ip(),
-		json_encode($info, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $uid,
+		hash('sha256', $token), $name, 'pending', time(), time(), router_ip($uid),
+		json_encode(clean_info($info, $uid), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $uid,
 	]);
 	$id = (int)db()->lastInsertId();
 	event($id, 'Новый роутер просится в систему');
@@ -495,12 +590,17 @@ function api_sync(array $r, array $in): array
 	$rid = (int)$r['id'];
 	$info = clean_info($in['info'] ?? null);
 
-	if (in_array($r['status'], ['rejected', 'removed'], true)) {
-		return ['status' => $r['status'], 'interval' => 3600];
+	if ($r['status'] === 'removed') {
+		// Агент 2.4+ удалит себя и сторожа (podkop остаётся)
+		return ['status' => 'removed', 'interval' => 3600, 'uninstall' => true];
 	}
+	if ($r['status'] === 'rejected') {
+		return ['status' => 'rejected', 'interval' => 3600];
+	}
+	$info = clean_info($in['info'] ?? null, (int)$r['user_id']);
 
 	q('UPDATE routers SET last_seen = ?, ip = ?, info = ?, offline_notified = 0 WHERE id = ?', [
-		$now, client_ip(), json_encode($info, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $rid,
+		$now, router_ip((int)$r['user_id']), json_encode($info, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $rid,
 	]);
 	if ($r['status'] === 'active' && $r['offline_notified']) {
 		$gone = $r['last_seen'] ? dur($now - (int)$r['last_seen']) : '?';
@@ -510,7 +610,7 @@ function api_sync(array $r, array $in): array
 		}
 	}
 	if ($r['status'] !== 'active') {
-		return ['status' => $r['status'], 'interval' => 60];
+		return ['status' => $r['status'], 'interval' => 60] + svc_flag($r);
 	}
 
 	// Секции
@@ -572,7 +672,7 @@ function api_sync(array $r, array $in): array
 		$out[] = ['id' => (int)$t['id'], 'type' => $t['type']] + (json_decode($t['payload'], true) ?: []);
 	}
 
-	return ['status' => 'active', 'interval' => (int)cfg('sync_interval', 120), 'tasks' => $out];
+	return ['status' => 'active', 'interval' => (int)cfg('sync_interval', 120), 'tasks' => $out] + svc_flag($r);
 }
 
 function watch_label(string $file): string
@@ -682,6 +782,7 @@ function check_alerts(): void
 {
 	$now = time();
 	podkop_latest(true);
+	scripts_latest(true);
 	try {
 		backup_daily();
 	} catch (Throwable $e) {
@@ -695,6 +796,11 @@ function check_alerts(): void
 		}
 	}
 	q('DELETE FROM tokens WHERE expires < ?', [$now]);
+	try {
+		billing_tick();
+	} catch (Throwable $e) {
+		error_log('billing: ' . $e->getMessage());
+	}
 	$failAfter = (int)cfg('fail_notify_after', 600);
 	// Всё раскладываем по владельцам роутеров: каждому — только о его роутерах
 	$offline = [];

@@ -16,7 +16,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['resend'])) {
 		} else {
 			kv_set(okey('verify_sent'), time());
 			send_verify_mail($u);
-			$_SESSION['flash'] = 'Письмо отправлено на ' . $u['email'] . '. Если его нет — проверьте папку «Спам».';
+			$_SESSION['flash'] = 'Письмо отправлено на ' . $u['email'] . '. Если его нет во «Входящих» — проверьте папку «Спам».';
 		}
 	}
 	header('Location: index.php');

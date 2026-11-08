@@ -112,6 +112,7 @@ function panel_header(string $title, bool $autoRefresh = false): void
 	input[type=email] { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c1c7d0; border-radius: 4px; font: inherit; min-height: 34px; }
 	footer { max-width: 1100px; margin: 0 auto; padding: 10px 16px 24px; color: #626f86; font-size: 12px; }
 	footer a { color: #626f86; }
+	.warnline { background: #fff4d6; border-left: 3px solid #f5a623; padding: 3px 8px; margin: 4px 0; font-size: 13px; border-radius: 3px; }
 	.badge { background: #c9372c; color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; font-weight: 700; }
 	.legal h3 { font-size: 15px; margin: 18px 0 6px; }
 	.legal p, .legal li { line-height: 1.55; }
@@ -136,7 +137,12 @@ function panel_header(string $title, bool $autoRefresh = false): void
 	.row input[type=text] { width: auto; }
 	pre.cmd { background: #1d2a3a; color: #e6edf5; padding: 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
 	details summary { cursor: pointer; }
-	button, .btn, input, select, textarea { min-height: 34px; }
+	button, .btn, select, textarea, input:not([type=checkbox]):not([type=radio]) { min-height: 34px; }
+	/* Галочки: квадратик и текст на одной линии, текст переносится рядом, а не под квадратиком */
+	input[type=checkbox], input[type=radio] { width: auto; min-height: 0; margin: 0 6px 0 0; vertical-align: -2px; flex-shrink: 0; }
+	label.check, label:has(> input[type=checkbox]) { display: inline-flex; align-items: flex-start; gap: 0; line-height: 1.4; }
+	label.check > input, label:has(> input[type=checkbox]) > input[type=checkbox] { margin-top: 2px; }
+	button:disabled { opacity: .5; cursor: not-allowed; }
 	@media (max-width: 600px) {
 		main { padding: 10px 8px; }
 		.card { padding: 12px; }
@@ -149,7 +155,7 @@ function panel_header(string $title, bool $autoRefresh = false): void
 <body>
 <header>
 	<span><b>🛰 <?= is_service() ? h(svc()['name']) : 'Роутеры' ?></b><?php if (panel_authed()): ?> &nbsp; <a href="index.php">Обзор</a>
-		<?php if (is_service()): ?> &nbsp; <a href="support.php">💬 Поддержка</a><?php else: $open = open_tickets_count(); ?> &nbsp; <a href="users.php">👥 Пользователи<?= $open ? ' <span class="badge">' . $open . '</span>' : '' ?></a><?php endif; ?>
+		<?php if (is_service()): ?> &nbsp; <a href="support.php">💬 Поддержка</a><?php else: $open = open_tickets_count(); ?> &nbsp; <a href="users.php">👥 Пользователи<?= $open ? ' <span class="badge" id="open-badge">' . $open . '</span>' : '<span class="badge" id="open-badge" style="display:none"></span>' ?></a><?php endif; ?>
 		 &nbsp; <a href="settings.php">⚙️ Настройки</a><?php endif; ?></span>
 	<?php if (panel_authed()): ?><span><?php if (is_service()): ?><span class="muted" style="color:#9fb0c4"><?= h(cur_user()['email'] ?? '') ?></span> &nbsp; <?php endif; ?><a href="index.php?logout=<?= h($_SESSION['csrf'] ?? '') ?>">выйти</a></span><?php endif; ?>
 </header>
@@ -159,5 +165,36 @@ function panel_header(string $title, bool $autoRefresh = false): void
 
 function panel_footer(): void
 {
-	echo "</main>\n</body>\n</html>\n";
+	echo "</main>\n";
+	if (is_service()) {
+		echo '<footer>© ' . date('Y') . ' ' . h(svc()['name']) . ' · <a href="legal.php?doc=terms">Пользовательское соглашение</a> · <a href="legal.php?doc=privacy">Политика конфиденциальности</a> · <a href="legal.php?doc=consent">Согласие на обработку данных</a></footer>' . "\n";
+	}
+	if (panel_authed()) {
+		?>
+<script>
+(function () {
+	// Блоки с data-poll обновляются сами раз в 15 секунд (переписка в поддержке), значок «ждут ответа» — тоже
+	function poll() {
+		if (document.hidden) return;
+		document.querySelectorAll('[data-poll]').forEach(function (el) {
+			fetch(el.getAttribute('data-poll'), { credentials: 'same-origin', cache: 'no-store' })
+				.then(function (r) { return r.ok && !r.redirected ? r.text() : null; })
+				.then(function (html) { if (html !== null && html !== el.innerHTML) { el.innerHTML = html; } })
+				.catch(function () {});
+		});
+		var b = document.getElementById('open-badge');
+		if (b) {
+			fetch('users.php?badge=1', { credentials: 'same-origin', cache: 'no-store' })
+				.then(function (r) { return r.ok ? r.json() : null; })
+				.then(function (j) { if (j) { b.textContent = j.open; b.style.display = j.open ? '' : 'none'; } })
+				.catch(function () {});
+		}
+	}
+	setInterval(poll, 15000);
+	document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+})();
+</script>
+<?php
+	}
+	echo "</body>\n</html>\n";
 }

@@ -60,7 +60,7 @@ function svc(): array
 		'trial_days' => 14,
 		'router_limit' => 3,
 		'grace_days' => 7,          // после окончания оплаты уведомления ещё идут столько дней
-		'price' => '',              // текст: «300 ₽ в месяц за 3 роутера»
+		'price' => 0,               // рублей в месяц (списывается с баланса по дням); 0 — бесплатно для всех
 		'pay_text' => '',           // как оплатить (пока нет платёжного шлюза)
 		'name' => 'Tim Routers',    // название сервиса в документах
 		'op_name' => '',            // оператор ПДн: ФИО (самозанятый) или ИП/ООО
@@ -78,19 +78,79 @@ function svc(): array
 function user_plan(array $u): array
 {
 	$now = time();
-	if (!empty($u['free'])) {
+	if (!empty($u['free']) || price_rub() <= 0) {
 		return ['active' => true, 'notify' => true, 'free' => true, 'until' => 0, 'label' => 'бесплатно (без срока)'];
 	}
-	$until = (int)$u['paid_until'];
-	if ($until > $now) {
+	// С учётом баланса: деньги списываются по дням, пока их хватает
+	$until = paid_until_projected($u);
+	if ($until > $now && ((int)$u['paid_until'] > $now || (int)$u['balance'] >= daily_kop())) {
 		$trial = empty($u['paid_ever']);
 		return ['active' => true, 'notify' => true, 'free' => false, 'until' => $until,
-			'label' => ($trial ? 'пробный период до ' : 'оплачено до ') . date('d.m.Y', $until)];
+			'label' => ($trial ? 'пробный период до ' : 'работает до ') . date('d.m.Y', $until)];
 	}
+	$until = (int)$u['paid_until'];
 	$grace = $until + (int)svc()['grace_days'] * 86400;
 	return ['active' => false, 'notify' => $grace > $now, 'free' => false, 'until' => $until,
 		'label' => 'закончилась ' . ($until ? date('d.m.Y', $until) : '')];
 }
+
+// ---------- Баланс ----------
+// Пользователь пополняет баланс; каждый день, когда оплаченный срок кончается, списывается цена за день
+// (цена в месяц / 30) и срок продлевается на сутки. Пробный и подаренные дни — без списаний.
+
+function price_rub(): int
+{
+	return max(0, (int)svc()['price']);
+}
+
+function price_text(): string
+{
+	return price_rub() > 0 ? price_rub() . ' ₽ в месяц' : 'бесплатно';
+}
+
+function daily_kop(): int
+{
+	return (int)round(price_rub() * 100 / 30);
+}
+
+function money(int $kop): string
+{
+	$r = $kop / 100;
+	return (fmod($r, 1.0) == 0.0 ? number_format($r, 0, ',', ' ') : number_format($r, 2, ',', ' ')) . ' ₽';
+}
+
+// До какого дня хватит оплаченного срока и баланса
+function paid_until_projected(array $u): int
+{
+	$base = max(time(), (int)$u['paid_until']);
+	$d = daily_kop();
+	return $d > 0 ? $base + intdiv((int)$u['balance'], $d) * 86400 : $base;
+}
+
+// Операция по балансу: + пополнение / − возврат; kind: topup|refund|charge|gift
+function balance_op(int $uid, int $kop, string $kind, string $comment = ''): void
+{
+	q('UPDATE users SET balance = balance + ?' . ($kind === 'topup' ? ', paid_ever = 1' : '') . ' WHERE id = ?', [$kop, $uid]);
+	q('INSERT INTO payments (user_id, ts, amount, kind, comment) VALUES (?, ?, ?, ?, ?)', [$uid, time(), $kop, $kind, mb_substr($comment, 0, 200)]);
+}
+
+// Из cron: продлить на сутки тех, у кого срок кончается, а на балансе есть деньги
+function billing_tick(): void
+{
+	$d = daily_kop();
+	if ($d <= 0) {
+		return;
+	}
+	foreach (rows("SELECT * FROM users WHERE status = 'active' AND free = 0 AND paid_until < ? AND balance >= ?", [time() + 600, $d]) as $u) {
+		q('UPDATE users SET balance = balance - ?, paid_until = ?, paid_ever = 1 WHERE id = ? AND balance >= ?', [$d, max(time(), (int)$u['paid_until']) + 86400, $u['id'], $d]);
+		q('INSERT INTO payments (user_id, ts, amount, kind, comment) VALUES (?, ?, ?, ?, ?)', [$u['id'], time(), -$d, 'charge', 'сутки работы сервиса']);
+		$left = (int)$u['balance'] - $d;
+		if ($left < $d * 3 && $left + $d >= $d * 3) {
+			notify_user((int)$u['id'], '💳 На балансе осталось ' . money($left) . ' — это примерно на ' . intdiv($left, $d) . ' дн. Пополните баланс в «Настройках» кабинета, чтобы сервис не отключился.');
+		}
+	}
+}
+
 
 function user_router_limit(array $u): int
 {
@@ -327,4 +387,15 @@ function delete_user(int $uid): void
 function open_tickets_count(): int
 {
 	return (int)val("SELECT COUNT(*) FROM tickets WHERE status = 'open'");
+}
+
+// Переписка по обращению (для страницы и для живого обновления)
+function ticket_msgs_html(int $tid, bool $forAdmin): string
+{
+	$out = '';
+	foreach (rows('SELECT * FROM ticket_msgs WHERE ticket_id = ? ORDER BY id', [$tid]) as $m) {
+		$who = $m['from_admin'] ? ($forAdmin ? 'Вы' : 'Поддержка') : ($forAdmin ? 'Пользователь' : 'Вы');
+		$out .= '<div class="msg" style="' . ($m['from_admin'] ? 'border-color:#22a06b' : '') . '"><span class="muted">' . $who . ' · ' . date('d.m.Y H:i', (int)$m['ts']) . '</span><br>' . nl2br(h($m['text'])) . '</div>';
+	}
+	return $out;
 }

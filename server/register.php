@@ -65,7 +65,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 		$u = get_user($uid);
 		send_verify_mail($u);
 		complete_login(false, $uid);
-		$_SESSION['flash'] = 'Кабинет создан. Мы отправили письмо на ' . $email . ' — подтвердите почту, чтобы добавлять роутеры.';
+		$_SESSION['flash'] = 'Кабинет создан. Мы отправили письмо на ' . $email . ' — подтвердите почту, чтобы добавлять роутеры. Если письма нет во «Входящих», проверьте папку «Спам» и отметьте письмо как «Не спам».';
 		header('Location: index.php');
 		exit;
 	}
@@ -84,7 +84,7 @@ panel_header('Регистрация');
 			<p><a href="index.php">← Вход</a></p>
 		<?php else: ?>
 			<?php if ($err): ?><div class="notice err"><?= h($err) ?></div><?php endif; ?>
-			<p class="muted">Удалённое управление роутерами OpenWrt с podkop. <?= (int)$svc['trial_days'] ?> дней бесплатно<?= $svc['price'] !== '' ? ', дальше — ' . h($svc['price']) : '' ?>.</p>
+			<p class="muted">Удалённое управление роутерами OpenWrt с podkop. <?= (int)$svc['trial_days'] ?> дней бесплатно<?= price_rub() > 0 ? ', дальше — ' . h(price_text()) : '' ?>.</p>
 			<form method="post" autocomplete="on">
 				<?= csrf_field() ?>
 				<div class="hp" aria-hidden="true"><label>Сайт <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
@@ -94,13 +94,22 @@ panel_header('Регистрация');
 				<input type="password" name="password" autocomplete="new-password" required minlength="10">
 				<label class="field">Пароль ещё раз</label>
 				<input type="password" name="password2" autocomplete="new-password" required minlength="10">
-				<p style="margin-top:12px"><label><input type="checkbox" name="agree_terms" value="1" required>
-					Принимаю <a href="legal.php?doc=terms" target="_blank">пользовательское соглашение</a></label></p>
-				<p><label><input type="checkbox" name="agree_pd" value="1" required>
-					Даю <a href="legal.php?doc=consent" target="_blank">согласие на обработку персональных данных</a>
-					в соответствии с <a href="legal.php?doc=privacy" target="_blank">политикой конфиденциальности</a></label></p>
-				<p><button type="submit" class="primary" style="width:100%">Создать кабинет</button></p>
+				<p style="margin-top:12px"><label class="check"><input type="checkbox" name="agree_terms" value="1" required data-agree>
+					<span>Принимаю <a href="legal.php?doc=terms" target="_blank">пользовательское соглашение</a></span></label></p>
+				<p><label class="check"><input type="checkbox" name="agree_pd" value="1" required data-agree>
+					<span>Даю <a href="legal.php?doc=consent" target="_blank">согласие на обработку персональных данных</a>
+					в соответствии с <a href="legal.php?doc=privacy" target="_blank">политикой конфиденциальности</a></span></label></p>
+				<p><button type="submit" class="primary" style="width:100%" id="reg-btn" disabled>Создать кабинет</button></p>
+				<p class="muted" id="reg-hint">Чтобы создать кабинет, отметьте обе галочки.</p>
 			</form>
+			<script>
+			(function () {
+				var boxes = document.querySelectorAll('[data-agree]'), btn = document.getElementById('reg-btn'), hint = document.getElementById('reg-hint');
+				function upd() { var ok = Array.prototype.every.call(boxes, function (b) { return b.checked; }); btn.disabled = !ok; hint.style.display = ok ? 'none' : ''; }
+				Array.prototype.forEach.call(boxes, function (b) { b.addEventListener('change', upd); });
+				upd();
+			})();
+			</script>
 			<p style="text-align:center">Уже есть кабинет? <a href="index.php">Войти</a></p>
 		<?php endif; ?>
 	</div>

@@ -29,7 +29,11 @@ $acc = router_access($router);
 $owner = (int)$router['user_id'] > 0 ? get_user((int)$router['user_id']) : null;
 $readonlyWhy = '';
 if ($acc === 'view') {
-	$readonlyWhy = 'Роутер пользователя ' . ($owner['email'] ?? '#' . $router['user_id']) . ' — только просмотр. Менять настройки и запрашивать отчёт можно, когда пользователь откроет доступ поддержке (в своих настройках).';
+	// Без разрешения пользователя администратор не видит ни настроек, ни данных его роутера
+	panel_header('Нет доступа');
+	echo '<div class="card"><h2>🔒 Роутер пользователя</h2><p>Настройки и данные роутеров пользователей видны только с их разрешения. Попросите пользователя открыть доступ поддержке — в обращении или в «Настройках» кабинета.</p><p><a href="users.php?id=' . (int)$router['user_id'] . '">← К пользователю</a></p></div>';
+	panel_footer();
+	exit;
 } elseif (is_service() && !user_can_manage(cur_user())) {
 	$readonlyWhy = 'Подписка не активна — роутер работает как настроен, но менять настройки нельзя. Как продлить — в «Настройках».';
 }
@@ -643,6 +647,20 @@ panel_header($router['name']);
 	<?php if ($errors): ?>
 		<div class="notice err"><b>Не отправлено — исправьте:</b><ul style="margin:6px 0 0"><?php foreach ($errors as $e): ?><li><?= h($e) ?></li><?php endforeach; ?></ul></div>
 	<?php endif; ?>
+	<?php if ($old = router_outdated($info)): ?>
+		<div class="notice" style="border-left:4px solid #f5a623">
+			<b>⚠️ Устарело: <?= h(implode(', ', $old)) ?>.</b> Новые версии исправляют ошибки и нужны для новых возможностей.
+			<?php if ($canEdit): ?>
+				<div class="row" style="margin-top:6px">
+					<form method="post"><?= csrf_field() ?><input type="hidden" name="ref" value="main"><button name="action" value="update" class="primary">⬆️ Обновить скрипты</button></form>
+					<?php if (podkop_outdated((string)($info['podkop'] ?? ''))): ?>
+						<form method="post" onsubmit="return confirm('Обновить podkop? Откатить обновление podkop нельзя.')"><?= csrf_field() ?><button name="action" value="update_podkop">📦 Обновить podkop</button></form>
+					<?php endif; ?>
+				</div>
+			<?php endif; ?>
+		</div>
+	<?php endif; ?>
+	<?php foreach (router_warnings($info) as $w): ?><div class="notice">⚠️ <?= h($w) ?></div><?php endforeach; ?>
 	<?php if (!$agentOk): ?>
 		<div class="notice err">Агент на роутере — версии <?= h($info['agent'] ?? '?') ?>, а для настройки с сайта нужна <?= MIN_AGENT ?> или новее. Обновите скрипты (в боте: роутер → «⬆️ Обновить скрипты»).</div>
 	<?php endif; ?>
@@ -676,7 +694,7 @@ panel_header($router['name']);
 			<form method="post" onsubmit="return confirm('Обновить podkop на этом роутере? Откатить обновление podkop нельзя.')">
 				<?= csrf_field() ?><button name="action" value="update_podkop">📦 Обновить podkop<?= podkop_outdated((string)($info['podkop'] ?? '')) ? ' до ' . h(podkop_latest()) : '' ?></button>
 			</form>
-			<form method="post" onsubmit="return confirm('Удалить «<?= h(addslashes($router['name'])) ?>» из системы? Агент перестанет выходить на связь; чтобы вернуть роутер, агент нужно переустановить.')">
+			<form method="post" onsubmit="return confirm('Удалить «<?= h(addslashes($router['name'])) ?>» из системы? При следующем выходе на связь агент и сторож удалятся с роутера (podkop и его настройки останутся). Чтобы вернуть роутер, нужно будет установить заново.')">
 				<?= csrf_field() ?><button name="action" value="delete" class="danger">🗑 Удалить из системы</button>
 			</form>
 		</div>

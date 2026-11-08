@@ -308,6 +308,12 @@ function block_routers(array $routers): string
 		?>
 		<div class="card">
 			<h2>Роутеры <span class="muted">🟢 всё работает: <?= $cnt['🟢'] ?> · 🔴 на связи, но есть проблема: <?= $cnt['🔴'] ?> · ⚫ не на связи: <?= $cnt['⚫'] ?></span></h2>
+			<?php $nOld = count(array_filter($routers, fn($x) => router_outdated(rinfo($x)))); if ($nOld): ?>
+				<form method="post" class="notice row" style="justify-content:space-between" onsubmit="return confirm('Обновить скрипты (агент и сторож) на всех роутерах?')">
+					<?= csrf_field() ?><span>⚠️ На роутерах (<?= $nOld ?>) устарели скрипты или podkop.</span>
+					<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
+				</form>
+			<?php endif; ?>
 			<?php if (!$routers): ?>
 				<p class="muted">Пока пусто. Как подключить роутер — внизу страницы.</p>
 			<?php endif; ?>
@@ -332,6 +338,8 @@ function block_routers(array $routers): string
 						<span><?= $status ?></span>
 					</div>
 					<div class="muted"><?= router_hw_line(rinfo($r)) ?></div>
+					<?php if ($old = router_outdated(rinfo($r))): ?><div class="warnline">⚠️ Устарело: <?= h(implode(', ', $old)) ?> — откройте роутер и нажмите «⬆️ Обновить»</div><?php endif; ?>
+					<?php foreach (router_warnings(rinfo($r)) as $w): ?><div class="warnline">⚠️ <?= h($w) ?></div><?php endforeach; ?>
 					<div style="margin-top:4px">
 						<?php foreach ($sections as $s): ?><div><?= tg_html(section_line($s, $byName)) ?></div><?php endforeach; ?>
 					</div>
@@ -447,7 +455,7 @@ panel_header('Обзор');
 	<?php if ($notice): ?><div class="notice"><?= h($notice) ?></div><?php endif; ?>
 	<?php if (is_service()): $me = cur_user(); $plan = user_plan($me); ?>
 		<?php if (empty($me['verified_at'])): ?>
-			<div class="notice">📧 Подтвердите почту <b><?= h($me['email']) ?></b> — ссылка в письме. Пока почта не подтверждена, роутеры добавлять нельзя.
+			<div class="notice">📧 Подтвердите почту <b><?= h($me['email']) ?></b> — ссылка в письме. Пока почта не подтверждена, роутеры добавлять нельзя. <b>Письмо может попасть в «Спам»</b> — проверьте эту папку и отметьте письмо «Не спам».
 				<form method="post" action="verify.php" style="display:inline"><?= csrf_field() ?><button name="resend" value="1">Отправить письмо ещё раз</button></form></div>
 		<?php endif; ?>
 		<?php if (!$plan['active']): ?>
@@ -467,6 +475,7 @@ panel_header('Обзор');
 	<details class="card" id="install" <?= $invFresh && time() - $inv['ts'] < 600 ? 'open' : '' ?>>
 		<summary><h2 style="display:inline">➕ Как подключить роутер</h2></summary>
 		<p>Нужно: роутер с OpenWrt и интернетом. podkop ставить заранее не обязательно — установщик поставит его сам и сразу выставит DNS через DoH 1.1.1.1.</p>
+		<div class="notice"><b>Требования к роутеру:</b> OpenWrt 23.05 или новее · оперативная память от 128 МБ · свободно во флеш-памяти от 16 МБ (если podkop ещё не установлен; podkop и sing-box занимают около 15 МБ). Роутеры с флешем 16 МБ и меньше не подходят. Установщик сначала проверит роутер и, если он не подходит, ничего не установит.</div>
 		<p><b>1.</b> Зайти на роутер по SSH: в PowerShell <code>ssh root@192.168.1.1</code> (адрес роутера может отличаться).</p>
 		<?php if (is_service()): ?><p class="muted">Роутеров в кабинете: <?= user_router_count(cur_uid()) ?> из <?= user_router_limit(cur_user()) ?>.</p><?php endif; ?>
 		<p><b>2.</b> Вставить одну команду и нажать Enter. В команде — <b>одноразовый код приглашения</b>: без него сервер не примет новый роутер. Код действует <?= INVITE_TTL / 3600 ?> ч и подходит для одного роутера.</p>

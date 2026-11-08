@@ -86,7 +86,33 @@ function db(): PDO
 function db_migrate(PDO $pdo): void
 {
 	$ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-	if ($ver >= 1) {
+	if ($ver >= 2) {
+		return;
+	}
+	if ($ver === 1) {
+		// v2: баланс кабинета (в копейках) и история операций по нему
+		$pdo->exec('BEGIN IMMEDIATE');
+		try {
+			if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() === 1) {
+				$pdo->exec("
+					ALTER TABLE users ADD COLUMN balance INTEGER NOT NULL DEFAULT 0;
+					CREATE TABLE IF NOT EXISTS payments (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						user_id INTEGER NOT NULL,
+						ts INTEGER NOT NULL,
+						amount INTEGER NOT NULL,
+						kind TEXT NOT NULL,
+						comment TEXT NOT NULL DEFAULT ''
+					);
+					CREATE INDEX IF NOT EXISTS payments_user ON payments(user_id, id);
+				");
+				$pdo->exec('PRAGMA user_version = 2');
+			}
+			$pdo->exec('COMMIT');
+		} catch (Throwable $e) {
+			$pdo->exec('ROLLBACK');
+			throw $e;
+		}
 		return;
 	}
 	$pdo->exec('BEGIN IMMEDIATE');
@@ -157,6 +183,7 @@ function db_migrate(PDO $pdo): void
 		$pdo->exec('ROLLBACK');
 		throw $e;
 	}
+	db_migrate($pdo); // следующие версии схемы
 }
 
 function q(string $sql, array $params = []): PDOStatement
