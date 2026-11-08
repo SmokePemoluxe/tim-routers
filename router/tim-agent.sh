@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.2"
+VERSION="2.3"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -441,6 +441,7 @@ events_json() {
 #   .pin            закреплённый сервер: host:port|название
 #   .pick           сервер, выбранный вручную «прямо сейчас» (не навсегда)
 #   .policy         обновление списка: 6h, 24h, dead (только при потере связи), off (только вручную)
+#   .sticky         не менять живой сервер на более быстрый (уходить с него только при отказе)
 
 SUB_DIR="$CONF_DIR/subs"
 SUB_UA="Incy/2.1 CFNetwork/1568.100.1 Darwin/24.0.0"
@@ -618,6 +619,17 @@ sub_apply_list() { # секция
 				sub_drop_pick "$1"
 			fi
 		fi
+	fi
+	# «Держаться за текущий сервер»: автовыбор не меняет живой сервер на более быстрый (допуск 30 с),
+	# а уходит с него, только когда тот перестал отвечать — на лучший из разрешённых
+	if [ -f "$sa_f.sticky" ]; then sa_tol=30000; else sa_tol=""; fi
+	if [ "$(uci -q get "podkop.$1.urltest_tolerance")" != "$sa_tol" ]; then
+		if [ -n "$sa_tol" ]; then
+			uci set "podkop.$1.urltest_tolerance=$sa_tol"
+		else
+			uci -q delete "podkop.$1.urltest_tolerance"
+		fi
+		SUB_CHANGED=1
 	fi
 	[ -n "$SUB_NOTE" ] && echo "$SUB_NOTE" > "$sa_f.err"
 	rm -f "$sa_want"
@@ -901,7 +913,7 @@ sub_json() { # секция
 	rm -f "$js_pf" "$js_mf"
 	js_pin=$(cat "$js_f.pin" 2>/dev/null)
 	set -- "$1" $js_stat
-	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"only":%s,"fallback":%s,"fb":%s,"pin":%s,"pin_name":%s,"pick":%s,"policy":%s,"error":%s,"now":%s,"servers":[%s]}' \
+	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"only":%s,"fallback":%s,"fb":%s,"pin":%s,"pin_name":%s,"pick":%s,"policy":%s,"sticky":%s,"error":%s,"now":%s,"servers":[%s]}' \
 		"$(json_num "$2")" "$(json_num "$3")" "$(json_num "$4")" \
 		"$(json_str "$(cat "$js_f.exclude" 2>/dev/null)")" \
 		"$(json_str "$(cat "$js_f.only" 2>/dev/null)")" \
@@ -910,6 +922,7 @@ sub_json() { # секция
 		"$(json_str "${js_pin%%|*}")" "$(json_str "$([ -n "$js_pin" ] && echo "${js_pin#*|}")")" \
 		"$(json_str "$(cat "$js_f.pick" 2>/dev/null)")" \
 		"$(json_str "$(cat "$js_f.policy" 2>/dev/null || echo 6h)")" \
+		"$([ -f "$js_f.sticky" ] && echo true || echo false)" \
 		"$(json_str "$(cat "$js_f.err" 2>/dev/null)")" \
 		"$(json_str "$js_nowhost")" "$js_servers"
 }
@@ -1628,6 +1641,11 @@ t_apply_config() {
 			v=$(sec_field sub_policy)
 			case "$v" in 6h|24h|dead|off) ;; *) v=6h ;; esac
 			sub_opt_set "$sf.policy" "$v"
+			if [ "$(sec_field sub_sticky)" = "true" ]; then
+				sub_opt_set "$sf.sticky" 1
+			else
+				sub_opt_set "$sf.sticky" ""
+			fi
 			v=$(sec_field sub_pin)
 			if [ -z "$v" ]; then
 				rm -f "$sf.pin"
