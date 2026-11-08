@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.3"
+VERSION="2.4"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -272,7 +272,7 @@ info_json() {
 	board=$(ubus call system board 2>/dev/null)
 	sb=false
 	pidof sing-box >/dev/null && sb=true
-	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s},"watchdog":' \
+	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s},"watchdog":' \
 		"$(json_str "$VERSION")" \
 		"$(json_str "$(jsonfilter -s "$board" -e '@.model' 2>/dev/null)")" \
 		"$(json_str "$DISTRIB_RELEASE")" \
@@ -281,6 +281,8 @@ info_json() {
 		"$(json_str "$(uci -q get system.@system[0].hostname)")" \
 		"$(json_num "$(cut -d. -f1 /proc/uptime)")" \
 		"$(json_num "$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{if (t) print int(a*100/t)}' /proc/meminfo)")" \
+		"$(json_num "$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)")" \
+		"$(json_num "$(df -k /overlay 2>/dev/null | awk 'NR==2 {print $4}')")" \
 		"$(json_str "$(uci -q get network.lan.ipaddr | cut -d/ -f1)")" \
 		"$(json_str "$(cat /sys/class/net/br-lan/address 2>/dev/null)")" \
 		"$(json_str "$(wan_mac)")" \
@@ -853,6 +855,7 @@ sub_tick_one() { # секция
 
 # Проход по всем подпискам (раз в цикл агента)
 subs_tick() {
+	[ -f "$SVC_OFF" ] && return 0
 	[ -d "$SUB_DIR" ] || return 0
 	t_now=$(date +%s)
 	t_any=0
@@ -1029,6 +1032,7 @@ sync_once_inner() {
 	rm -f "$RESULTS.sending" "$EVENTS.sending"
 	date '+%Y-%m-%d %H:%M:%S' > "$RUN_DIR/last_sync"
 	echo "$STATUS" > "$RUN_DIR/status"
+	svc_seen "$resp"
 
 	i=$(jsonfilter -s "$resp" -e '@.interval' 2>/dev/null)
 	case "$i" in
@@ -1955,6 +1959,73 @@ t_update_podkop() {
 	fi
 }
 
+# ---------- Сервис включён / выключен ----------
+# Сторож и автоматика подписок работают только при активной подписке и пока роутер на связи с сервисом.
+# podkop не трогаем: интернет работает с последними настройками.
+
+SVC_OFF="$CONF_DIR/svc_off"
+WD_SVC_OFF="/etc/inet-watchdog/svc_off"
+LAST_OK="$CONF_DIR/last_ok"
+OFFLINE_LIMIT=1800 # 30 минут без связи с сервисом при работающем интернете
+
+svc_set() { # on|off [причина]
+	if [ "$1" = "on" ]; then
+		[ -f "$SVC_OFF" ] || return 0
+		rm -f "$SVC_OFF" "$WD_SVC_OFF"
+		log "сервис снова включён — запускаю сторожа"
+		if [ -x /etc/init.d/inet-watchdog ]; then
+			/etc/init.d/inet-watchdog enable
+			/etc/init.d/inet-watchdog restart >/dev/null 2>&1
+		fi
+		return 0
+	fi
+	[ "$(cat "$SVC_OFF" 2>/dev/null)" = "$2" ] && return 0
+	mkdir -p "$CONF_DIR" /etc/inet-watchdog
+	printf '%s' "$2" > "$SVC_OFF"
+	printf '%s' "$2" > "$WD_SVC_OFF"
+	log "сервис выключен: $2"
+	if [ -x /etc/init.d/inet-watchdog ]; then
+		/etc/init.d/inet-watchdog stop >/dev/null 2>&1
+		/etc/init.d/inet-watchdog disable
+	fi
+}
+
+# После удачного выхода на связь
+svc_seen() {
+	now=$(date +%s)
+	echo "$now" > "$RUN_DIR/last_ok"
+	# На флэш — не чаще раза в 20 минут (чтобы после перезагрузки знать, когда была связь)
+	[ $((now - $(cat "$LAST_OK" 2>/dev/null || echo 0))) -ge 1200 ] && echo "$now" > "$LAST_OK"
+	SVC_UNINSTALL=0
+	[ "$(jsonfilter -s "$1" -e '@.uninstall' 2>/dev/null)" = "true" ] && SVC_UNINSTALL=1
+	case "$(jsonfilter -s "$1" -e '@.svc' 2>/dev/null)" in
+		on) svc_set on ;;
+		off) svc_set off "$(jsonfilter -s "$1" -e '@.svc_reason' 2>/dev/null | head -c 200)" ;;
+	esac
+}
+
+# Сервис долго недоступен, а интернет есть — значит, доступ к нему закрыт: выключаем наши службы
+svc_offline_check() {
+	last=$(cat "$RUN_DIR/last_ok" 2>/dev/null || cat "$LAST_OK" 2>/dev/null)
+	if [ -z "$last" ]; then
+		date +%s > "$LAST_OK"
+		return 1
+	fi
+	[ $(($(date +%s) - last)) -lt "$OFFLINE_LIMIT" ] && return 1
+	sub_inet_ok || return 1
+	nslookup raw.githubusercontent.com >/dev/null 2>&1 || return 1
+	svc_set off "нет связи с сервисом больше 30 минут при работающем интернете — для работы сервиса нужен постоянный доступ к нему"
+	return 1
+}
+
+# Кабинет удалён или роутер удалён из системы: убираем сторожа и агента (podkop и его настройки остаются)
+self_uninstall() {
+	log "роутер удалён из сервиса — удаляю сторожа и агента (podkop остаётся)"
+	[ -x /usr/bin/inet-watchdog ] && /usr/bin/inet-watchdog uninstall >/dev/null 2>&1
+	rm -rf /etc/inet-watchdog
+	( trap '' HUP TERM; sleep 2; do_uninstall ) </dev/null >/dev/null 2>&1 &
+}
+
 # ---------- Режимы ----------
 
 run() {
@@ -1971,13 +2042,17 @@ run() {
 
 	while true; do
 		TASKS_DONE=0
-		sync_once
+		sync_once || svc_offline_check
 		# Результаты задач отправляем сразу, не дожидаясь следующего цикла
 		[ "$TASKS_DONE" = 1 ] && sync_once
 		[ "$RESTART_FOR_UPDATE" = 1 ] && exit 0
 		if [ "$STATUS" = "active" ] && sync_lock; then
 			subs_tick
 			sync_unlock
+		fi
+		if [ "$STATUS" = "removed" ] && [ "$SVC_UNINSTALL" = 1 ]; then
+			self_uninstall
+			exit 0
 		fi
 		case "$STATUS" in
 			rejected|removed) sleep 3600 ;;

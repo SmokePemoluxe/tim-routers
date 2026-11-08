@@ -34,7 +34,7 @@
 # Отчёт:       inet-watchdog report > /tmp/report.txt
 # Настройки:   /etc/inet-watchdog.conf  (после правки: inet-watchdog restart)
 
-VERSION="3.5"
+VERSION="3.6"
 NAME="inet-watchdog"
 BIN="/usr/bin/$NAME"
 INIT="/etc/init.d/$NAME"
@@ -46,6 +46,8 @@ WD_REBOOT_FLAG="$STATE_DIR/rebooted_by_watchdog"
 STATE_FILE="/tmp/$NAME.json"
 BOOT_MARK="/tmp/$NAME.booted"
 LAST_RESET_FILE="/tmp/$NAME.last_reset"
+# Сервис выключен (нет подписки или долго нет связи с сервером): сторож ничего не делает
+SVC_OFF="$STATE_DIR/svc_off"
 LUCI_VIEW="/www/luci-static/resources/view/$NAME.js"
 LUCI_MENU="/usr/share/luci/menu.d/luci-app-$NAME.json"
 LUCI_ACL="/usr/share/rpcd/acl.d/luci-app-$NAME.json"
@@ -413,6 +415,15 @@ log_boot() {
 run() {
 	load_conf
 	versions_init
+	# Сервис выключен — ничего не проверяем и не чиним, пока его не включат
+	ping_json=""
+	dns_json=""
+	web=off
+	mem=$(mem_free_percent)
+	while [ -f "$SVC_OFF" ]; do
+		write_state svc_off "$(head -c 200 "$SVC_OFF" | tr -d '"\')" 0
+		sleep 60
+	done
 	log_boot
 	log "запущен v$VERSION; ожидание после старта ${BOOT_DELAY}с"
 
@@ -441,6 +452,11 @@ run() {
 	podkop_bad=0
 
 	while true; do
+		if [ -f "$SVC_OFF" ]; then
+			write_state svc_off "$(head -c 200 "$SVC_OFF" | tr -d '"\')" 0
+			sleep 60
+			continue
+		fi
 		collect
 		now=$(uptime_s)
 
@@ -664,23 +680,13 @@ EOF
 			"file": {
 				"$STATE_FILE": [ "read" ],
 				"$HISTORY_FILE": [ "read" ],
-				"$CONF": [ "read" ],
+				"$SVC_OFF": [ "read" ],
 				"$BIN json": [ "exec" ],
 				"$BIN report": [ "exec" ]
 			},
 			"ubus": {
 				"file": [ "read", "exec" ],
 				"service": [ "list" ]
-			}
-		},
-		"write": {
-			"file": {
-				"$CONF": [ "write" ],
-				"$BIN restart": [ "exec" ],
-				"$BIN clear": [ "exec" ]
-			},
-			"ubus": {
-				"file": [ "write", "exec" ]
 			}
 		}
 	}
@@ -699,7 +705,7 @@ EOF
 var BIN = '/usr/bin/inet-watchdog',
 	STATE = '/tmp/inet-watchdog.json',
 	HISTORY = '/etc/inet-watchdog/history.log',
-	CONF = '/etc/inet-watchdog.conf';
+	SVC_OFF = '/etc/inet-watchdog/svc_off';
 
 var SETTINGS = [
 	{ key: 'HOSTS', title: 'Хосты для пинга', descr: 'IP-адреса через пробел. Связь есть, если ответил хотя бы один.' },
@@ -823,7 +829,9 @@ function renderStatus(running, st) {
 	}
 
 	var phase;
-	if (st.phase == 'boot_wait')
+	if (st.phase == 'svc_off')
+		phase = [ badge('сторож выключен сервисом', 'muted'), st.problem ];
+	else if (st.phase == 'boot_wait')
 		phase = badge('ожидание после загрузки роутера', 'info');
 	else if (st.phase == 'ok')
 		phase = badge('всё в порядке', 'ok');
@@ -935,7 +943,7 @@ function downloadReport() {
 
 return view.extend({
 	load: function() {
-		return Promise.all([ isRunning(), readState(), readHistory(), L.resolveDefault(fs.read(CONF), '') ]);
+		return Promise.all([ isRunning(), readState(), readHistory(), L.resolveDefault(fs.read(SVC_OFF), '') ]);
 	},
 
 	render: function(data) {
@@ -943,7 +951,7 @@ return view.extend({
 			bootsBox = E('div', {}),
 			histBox = E('div', {}),
 			lastHistory = null,
-			confText = data[3];
+			svcOff = (data[3] || '').trim();
 
 		var historyAll = false;
 		var showHistory = function(text, force) {
@@ -983,86 +991,12 @@ return view.extend({
 			E('button', {
 				'class': 'btn cbi-button cbi-button-apply',
 				click: ui.createHandlerFn(this, downloadReport)
-			}, [ 'Скачать отчёт' ]), ' ',
-			E('button', {
-				'class': 'btn cbi-button cbi-button-neutral',
-				click: ui.createHandlerFn(this, function() {
-					return fs.exec(BIN, [ 'restart' ]).then(function() {
-						notify('Сторож перезапущен. Первая проверка — после паузы BOOT_DELAY.');
-						return refresh();
-					});
-				})
-			}, [ 'Перезапустить сторож' ]), ' ',
-			E('button', {
-				'class': 'btn cbi-button cbi-button-remove',
-				click: ui.createHandlerFn(this, function() {
-					if (!confirm('Очистить историю событий?'))
-						return;
-					return fs.exec(BIN, [ 'clear' ]).then(refresh);
-				})
-			}, [ 'Очистить историю' ])
+			}, [ 'Скачать отчёт' ])
 		]);
-
-		var vals = parseConf(confText), inputs = {};
-		var fields = SETTINGS.map(function(s) {
-			var inp;
-			if (s.bool) {
-				inp = E('input', { type: 'checkbox' });
-				inp.checked = (vals[s.key] == '1');
-			}
-			else {
-				inp = E('input', { type: 'text', 'class': 'cbi-input-text', style: 'width:100%;max-width:420px' });
-				inp.value = vals[s.key] || '';
-			}
-			inputs[s.key] = inp;
-			return E('div', { 'class': 'cbi-value' }, [
-				E('label', { 'class': 'cbi-value-title' }, [ s.title ]),
-				E('div', { 'class': 'cbi-value-field' }, [ inp ].concat(s.descr ? [ E('div', { 'class': 'cbi-value-description' }, [ s.descr ]) ] : []))
-			]);
-		});
-
-		var save = function() {
-			var newVals = {};
-			for (var i = 0; i < SETTINGS.length; i++) {
-				var s = SETTINGS[i], inp = inputs[s.key], v;
-				if (s.bool)
-					v = inp.checked ? '1' : '0';
-				else
-					v = inp.value.trim().replace(/\s+/g, ' ').replace(/["'`$\\;&|<>]/g, '');
-				if (s.num && (!/^\d+$/.test(v) || (s.min && +v < s.min))) {
-					notify('«' + s.title + '»: нужно целое число' + (s.min ? ' не меньше ' + s.min : ''), 'danger');
-					return Promise.resolve();
-				}
-				newVals[s.key] = v;
-			}
-
-			var seen = {};
-			var lines = (confText || '').split('\n').map(function(l) {
-				var m = l.match(/^([A-Z_]+)=/);
-				if (m && newVals.hasOwnProperty(m[1])) {
-					seen[m[1]] = true;
-					return m[1] + '="' + newVals[m[1]] + '"';
-				}
-				return l;
-			});
-			Object.keys(newVals).forEach(function(k) {
-				if (!seen[k])
-					lines.push(k + '="' + newVals[k] + '"');
-			});
-			var out = lines.join('\n').replace(/\n*$/, '\n');
-
-			return fs.write(CONF, out).then(function() {
-				confText = out;
-				return fs.exec(BIN, [ 'restart' ]);
-			}).then(function() {
-				notify('Настройки сохранены, сторож перезапущен.');
-			}).catch(function(e) {
-				notify('Не удалось сохранить: ' + e.message, 'danger');
-			});
-		};
 
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, [ 'Сторож интернета v__WD_VERSION__' ]),
+			svcOff ? E('div', { 'class': 'alert-message warning', style: 'margin-bottom:1em' }, [ E('strong', {}, [ 'Сторож выключен сервисом: ' ]), svcOff ]) : '',
 			E('div', { 'class': 'cbi-map-descr' }, [
 				'Следит за интернетом, DNS (podkop), памятью и веб-интерфейсом. При сбое перезапускает WAN, podkop или uhttpd, а если не помогает — перезагружает роутер. ',
 				'Если что-то непонятно — нажмите «Скачать отчёт» и отправьте файл.'
@@ -1076,13 +1010,7 @@ return view.extend({
 				bootsBox
 			]),
 			E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ 'История событий' ]), histBox ]),
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, [ 'Настройки' ]),
-				E('div', {}, fields),
-				E('div', { 'class': 'cbi-page-actions' }, [
-					E('button', { 'class': 'btn cbi-button cbi-button-save', click: ui.createHandlerFn(this, save) }, [ 'Сохранить и перезапустить сторож' ])
-				])
-			])
+			E('p', { style: 'color:#888' }, [ 'Настройки сторожа задаёт сервис — здесь только состояние, история и проверка.' ])
 		]);
 	},
 

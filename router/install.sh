@@ -45,6 +45,35 @@ RAW="https://raw.githubusercontent.com/$REPO/$REF/router"
 . /etc/openwrt_release
 say "Роутер: $(ubus call system board 2>/dev/null | jsonfilter -e '@.model' 2>/dev/null), OpenWrt $DISTRIB_RELEASE"
 
+# --- Проверка системы: до любых изменений. Не подходит — ничего не ставим. ---
+# podkop + sing-box занимают около 15 МБ флеша (столько требует и официальный установщик podkop)
+# и требуют памяти: sing-box на роутере с 64 МБ не уживается.
+say "Проверяю, подходит ли роутер"
+check_fail=""
+major=$(echo "$DISTRIB_RELEASE" | cut -d. -f1)
+case "$major" in
+	''|*[!0-9]*) [ "$DISTRIB_RELEASE" = "SNAPSHOT" ] || check_fail="$check_fail\n  - не удалось определить версию OpenWrt ($DISTRIB_RELEASE)" ;;
+	*) [ "$major" -ge 23 ] || check_fail="$check_fail\n  - OpenWrt $DISTRIB_RELEASE слишком старый: нужен 23.05 или новее" ;;
+esac
+mem_mb=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)
+[ "${mem_mb:-0}" -ge 120 ] || check_fail="$check_fail\n  - мало оперативной памяти: ${mem_mb} МБ, нужно от 128 МБ"
+flash_kb=$(df -k /overlay 2>/dev/null | awk 'NR==2 {print $4}')
+[ -n "$flash_kb" ] || flash_kb=$(df -k / | awk 'NR==2 {print $4}')
+if [ -x /etc/init.d/podkop ] || [ "$WITH_PODKOP" = "0" ]; then
+	need_kb=2048
+else
+	need_kb=16384
+fi
+[ "${flash_kb:-0}" -ge "$need_kb" ] || check_fail="$check_fail\n  - мало свободного места во флеш-памяти: $((${flash_kb:-0} / 1024)) МБ, нужно от $((need_kb / 1024)) МБ$([ "$need_kb" = 16384 ] && echo ' (podkop и sing-box занимают около 15 МБ; роутеры с флешем 16 МБ не подходят)')"
+if [ -n "$check_fail" ]; then
+	printf '\n\033[31m%s\033[0m' "Роутер не подходит — ничего не установлено:"
+	printf "$check_fail\n"
+	echo
+	echo "Требования: OpenWrt 23.05 или новее, оперативная память от 128 МБ, свободно во флеше от 16 МБ (если podkop ещё не установлен)."
+	exit 1
+fi
+echo "OK: OpenWrt $DISTRIB_RELEASE, память ${mem_mb} МБ, свободно во флеше $((flash_kb / 1024)) МБ"
+
 if [ -z "$SERVER" ]; then
 	printf 'Адрес сервера (в панели: «Как подключить роутер»): '
 	read -r SERVER
