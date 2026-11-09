@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.5"
+VERSION="2.6"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -456,6 +456,14 @@ sub_hwid() {
 	cat "$CONF_DIR/sub_hwid"
 }
 
+# Модель устройства для подписки: SM- и 5 знаков из HWID — постоянная и своя у каждого роутера
+sub_model() {
+	if [ ! -s "$CONF_DIR/sub_model" ]; then
+		printf 'SM-%s' "$(sub_hwid | cut -c1-5 | tr a-z A-Z)" > "$CONF_DIR/sub_model"
+	fi
+	cat "$CONF_DIR/sub_model"
+}
+
 urldecode() {
 	printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')"
 }
@@ -470,8 +478,10 @@ sub_fetch() {
 		if [ "$mode" = plain ]; then
 			curl -sSfL -m 30 -o "$raw" "$url" 2>/dev/null || continue
 		else
-			curl -sSfL -m 30 -A "$SUB_UA" -H "x-hwid: $(sub_hwid)" -H "x-device-os: iOS" -H "x-ver-os: 18.1" \
-				-H "x-device-model: iPhone" -o "$raw" "$url" 2>/dev/null || continue
+			# Провайдер показывает устройство как «ОС модель»: Android и свой код у каждого роутера,
+			# чтобы роутеры различались в списке устройств подписки
+			curl -sSfL -m 30 -A "$SUB_UA" -H "x-hwid: $(sub_hwid)" -H "x-device-os: Android" -H "x-ver-os: 14" \
+				-H "x-device-model: $(sub_model)" -o "$raw" "$url" 2>/dev/null || continue
 		fi
 		if grep -qi '<html' "$raw"; then
 			continue
@@ -916,7 +926,7 @@ sub_json() { # секция
 	rm -f "$js_pf" "$js_mf"
 	js_pin=$(cat "$js_f.pin" 2>/dev/null)
 	set -- "$1" $js_stat
-	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"only":%s,"fallback":%s,"fb":%s,"pin":%s,"pin_name":%s,"pick":%s,"policy":%s,"sticky":%s,"error":%s,"now":%s,"servers":[%s]}' \
+	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"only":%s,"fallback":%s,"fb":%s,"pin":%s,"pin_name":%s,"pick":%s,"policy":%s,"sticky":%s,"device":%s,"error":%s,"now":%s,"servers":[%s]}' \
 		"$(json_num "$2")" "$(json_num "$3")" "$(json_num "$4")" \
 		"$(json_str "$(cat "$js_f.exclude" 2>/dev/null)")" \
 		"$(json_str "$(cat "$js_f.only" 2>/dev/null)")" \
@@ -926,6 +936,7 @@ sub_json() { # секция
 		"$(json_str "$(cat "$js_f.pick" 2>/dev/null)")" \
 		"$(json_str "$(cat "$js_f.policy" 2>/dev/null || echo 6h)")" \
 		"$([ -f "$js_f.sticky" ] && echo true || echo false)" \
+		"$(json_str "Android $(sub_model)")" \
 		"$(json_str "$(cat "$js_f.err" 2>/dev/null)")" \
 		"$(json_str "$js_nowhost")" "$js_servers"
 }
@@ -1395,6 +1406,30 @@ valid_outbound() { # секция json
 	return 0
 }
 
+# Переименовать секцию podkop: имя, тег в цепочке, ссылки из других секций, файлы подписки
+section_rename() { # старое новое
+	uci rename "podkop.$1=$2"
+	ob=$(opt "$2" outbound_json)
+	if [ -n "$ob" ]; then
+		uci set "podkop.$2.outbound_json=$(printf '%s' "$ob" | sed "s/\"tag\"[[:space:]]*:[[:space:]]*\"$1-out\"/\"tag\":\"$2-out\"/")"
+	fi
+	for sr_s in $(podkop_sections); do
+		[ "$sr_s" = "$2" ] && continue
+		ob=$(opt "$sr_s" outbound_json)
+		case "$ob" in
+			*"\"$1-out\""*) uci set "podkop.$sr_s.outbound_json=$(printf '%s' "$ob" | sed "s/\"detour\"[[:space:]]*:[[:space:]]*\"$1-out\"/\"detour\":\"$2-out\"/")" ;;
+		esac
+	done
+	for sr_f in "$SUB_DIR/$1".*; do
+		[ -e "$sr_f" ] && mv "$sr_f" "$SUB_DIR/$2.${sr_f##*/$1.}"
+	done
+	for sr_f in "$RUN_DIR/sub_$1".*; do
+		[ -e "$sr_f" ] && mv "$sr_f" "$RUN_DIR/sub_$2.${sr_f##*/sub_$1.}"
+	done
+	PODKOP_CHANGED=1
+	log "секция $1 переименована в $2"
+}
+
 # Записать outbound в секцию
 set_outbound() { # секция json
 	uci set "podkop.$1.proxy_config_type=outbound"
@@ -1503,9 +1538,38 @@ t_apply_config() {
 		fi
 	done
 
+	# --- Переименование секций (до остальных изменений: дальше секция уже под новым именем) ---
+	# Не удалось переименовать — эту секцию дальше не трогаем (иначе создалась бы новая с этим именем)
+	RENAME_FAILED=" "
+	SEC_IDX=0
+	for name in $(task_field 'sections[*].name'); do
+		old=$(sec_field rename_from)
+		if [ -n "$old" ] && [ "$old" != "$name" ]; then
+			if ! valid_name "$name" || [ "$name" = "settings" ]; then
+				errors="$errors; недопустимое новое имя секции $name"
+				RENAME_FAILED="$RENAME_FAILED$name "
+			elif ! is_section "$old"; then
+				errors="$errors; нет секции $old для переименования"
+				RENAME_FAILED="$RENAME_FAILED$name "
+			elif is_section "$name"; then
+				errors="$errors; секция $name уже есть — $old не переименована"
+				RENAME_FAILED="$RENAME_FAILED$name "
+			else
+				section_rename "$old" "$name"
+			fi
+		fi
+		SEC_IDX=$((SEC_IDX + 1))
+	done
+
 	# --- Секции ---
 	SEC_IDX=0
 	for name in $(task_field 'sections[*].name'); do
+		case "$RENAME_FAILED" in
+			*" $name "*)
+				SEC_IDX=$((SEC_IDX + 1))
+				continue
+				;;
+		esac
 		ct=$(sec_field connection_type)
 		key=$(sec_field key)
 		ob=$(sec_field outbound)

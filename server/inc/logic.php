@@ -10,6 +10,28 @@ const KNOWN_LISTS = [
 	'digitalocean', 'cloudfront',
 ];
 
+// Правила совместимости готовых списков — как в самом podkop (luci-app-podkop, main.js):
+// региональный список в секции только один; с russia_inside — только эти (остальные уже входят в него)
+const REGIONAL_LISTS = ['russia_inside', 'russia_outside', 'ukraine_inside'];
+const ALLOWED_WITH_RUSSIA_INSIDE = ['russia_inside', 'meta', 'twitter', 'discord', 'telegram', 'cloudflare', 'google_ai', 'google_play', 'hetzner', 'ovh', 'hodca', 'roblox', 'digitalocean', 'cloudfront'];
+
+// Ошибки в наборе готовых списков одной секции (пустой массив — всё в порядке)
+function community_problems(array $lists): array
+{
+	$out = [];
+	$reg = array_values(array_intersect(REGIONAL_LISTS, $lists));
+	if (count($reg) > 1) {
+		$out[] = 'региональные списки нельзя выбирать вместе: ' . implode(', ', $reg) . ' — оставьте один';
+	}
+	if (in_array('russia_inside', $lists, true)) {
+		$extra = array_values(array_diff($lists, ALLOWED_WITH_RUSSIA_INSIDE, REGIONAL_LISTS));
+		if ($extra) {
+			$out[] = implode(', ', $extra) . ' уже входят в russia_inside — уберите их (вместе с russia_inside можно только ' . implode(', ', array_slice(ALLOWED_WITH_RUSSIA_INSIDE, 1)) . ')';
+		}
+	}
+	return $out;
+}
+
 const KEY_SCHEMES = 'hy2|hysteria2|vless|vmess|ss|trojan|tuic|socks4|socks5|anytls';
 
 // Откуда роутеры берут скрипты (установка и обновления)

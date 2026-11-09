@@ -9,7 +9,8 @@ panel_require();
 
 const MIN_AGENT = '2.0';
 const SUB_OPTS_AGENT = '2.2'; // выбор стран, закрепление, переключение сервера
-const SUB_STICKY_AGENT = '2.3'; // «держаться за текущий сервер»
+const SUB_STICKY_AGENT = '2.3';
+const RENAME_AGENT = '2.6'; // переименование секций // «держаться за текущий сервер»
 
 $rid = (int)($_GET['id'] ?? 0);
 $router = router_for_page($rid); // чужой роутер — «не найден»
@@ -23,6 +24,7 @@ $info = rinfo($router);
 $agentOk = version_compare((string)($info['agent'] ?? '0'), MIN_AGENT, '>=');
 $subOptsOk = version_compare((string)($info['agent'] ?? '0'), SUB_OPTS_AGENT, '>=');
 $subStickyOk = version_compare((string)($info['agent'] ?? '0'), SUB_STICKY_AGENT, '>=');
+$renameOk = version_compare((string)($info['agent'] ?? '0'), RENAME_AGENT, '>=');
 
 // Кто смотрит: владелец; администратор с разрешением пользователя (поддержка); администратор без разрешения — только просмотр
 $acc = router_access($router);
@@ -94,7 +96,8 @@ function sections_from_post(int $rid): array
 		$base = $db[$orig] ?? ['config' => 'url', 'status' => '', 'cur_detour' => '', 'sub' => null];
 		$out[] = [
 			'orig' => $orig,
-			'name' => $orig !== '' ? $orig : trim((string)($p['name'] ?? '')),
+			// У существующей секции имя можно поменять (поле «новое имя» после ✏️)
+			'name' => $orig !== '' ? (trim((string)($p['new_name'] ?? '')) ?: $orig) : trim((string)($p['name'] ?? '')),
 			'type' => (string)($p['type'] ?? ''),
 			'config' => $base['config'],
 			'status' => $base['status'],
@@ -150,6 +153,42 @@ function build_payload(array $sections, array $settings): array
 		}
 	}
 	$payload['settings'] = $settings;
+
+	// Переименования: старое имя → новое
+	global $renameOk;
+	$renames = [];
+	$origNames = [];
+	foreach ($sections as $s) {
+		if ($s['orig'] !== '') {
+			$origNames[$s['orig']] = true;
+		}
+	}
+	foreach ($sections as $s) {
+		if ($s['orig'] !== '' && !$s['delete'] && $s['name'] !== $s['orig']) {
+			if (!$renameOk) {
+				$errors[] = "{$s['orig']}: переименовать можно после обновления скриптов роутера (нужен агент " . RENAME_AGENT . ')';
+			} elseif (isset($origNames[$s['name']])) {
+				$errors[] = "{$s['orig']}: секция с именем {$s['name']} уже есть";
+			} else {
+				$renames[$s['orig']] = $s['name'];
+			}
+		}
+	}
+	foreach ($sections as &$s) {
+		if ($s['detour'] !== '' && isset($renames[$s['detour']])) {
+			$s['detour'] = $renames[$s['detour']];
+		}
+	}
+	unset($s);
+
+	// Готовые списки: те же правила, что в podkop
+	foreach ($sections as $s) {
+		if (!$s['delete']) {
+			foreach (community_problems($s['community']) as $p) {
+				$errors[] = ($s['name'] !== '' ? $s['name'] : 'новая секция') . ': ' . $p;
+			}
+		}
+	}
 
 	// Через какие секции можно пускать: существующие (не новые и не удаляемые) секции «через прокси»
 	$targets = [];
@@ -284,6 +323,7 @@ function build_payload(array $sections, array $settings): array
 
 		$payload['sections'][] = [
 			'name' => $s['name'],
+			'rename_from' => isset($renames[$s['orig']]) ? $s['orig'] : '',
 			'connection_type' => $s['type'],
 			'key' => $key,
 			'outbound' => $outbound,
@@ -489,7 +529,9 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 			<?php if ($isNew): ?>
 				<span style="flex:1">Имя новой секции: <input type="text" name="sections[<?= $i ?>][name]" value="<?= h($s['name']) ?>" placeholder="Office" style="max-width:220px"></span>
 			<?php else: ?>
-				<span><b><?= h($s['name']) ?></b> &nbsp; <span class="muted"><?= preg_replace('#&lt;(/?)b&gt;#', '<$1b>', h(strip_tags($s['status']))) ?></span></span>
+				<span><b data-sname><?= h($s['orig']) ?></b><?php global $renameOk; if ($renameOk): ?> <button type="button" title="Переименовать" onclick="renameSection(this)" style="min-height:0;padding:1px 6px">✏️</button>
+					<input type="text" name="sections[<?= $i ?>][new_name]" value="<?= $s['name'] !== $s['orig'] ? h($s['name']) : '' ?>" placeholder="новое имя (латиница, цифры, _)" style="max-width:220px;<?= $s['name'] !== $s['orig'] ? '' : 'display:none' ?>" pattern="[A-Za-z][A-Za-z0-9_]{0,29}"><?php endif; ?>
+					&nbsp; <span class="muted"><?= preg_replace('#&lt;(/?)b&gt;#', '<$1b>', h(strip_tags($s['status']))) ?></span></span>
 			<?php endif; ?>
 			<span>
 				<button type="button" onclick="moveSection(this, -1)" title="Выше">↑</button>
@@ -581,7 +623,7 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 						<?php if ($sub = $s['sub']): ?>
 							<div style="margin-top:8px">
 								<?php if (!empty($sub['error'])): ?><div class="notice err" style="margin:0 0 6px"><?= h($sub['error']) ?></div><?php endif; ?>
-								<span class="muted">Обновлено <?= $sub['updated'] ? ago($sub['updated']) : '—' ?> · подходят <?= (int)$sub['usable'] ?> из <?= (int)$sub['total'] ?> серверов</span>
+								<span class="muted">Обновлено <?= $sub['updated'] ? ago($sub['updated']) : '—' ?> · подходят <?= (int)$sub['usable'] ?> из <?= (int)$sub['total'] ?> серверов<?= !empty($sub['device']) ? ' · в списке устройств подписки: <b>' . h($sub['device']) . '</b>' : '' ?></span>
 								<?php $srv = $sub['servers'] ?? []; $work = array_filter($srv, fn($x) => $x['in'] ?? true); $alive = count(array_filter($work, fn($x) => !empty($x['delay']))); $canSwitch = $subOptsOk && empty($sub['pin']); ?>
 								<?php if (!empty($sub['pin'])): ?><div class="notice" style="margin:0 0 6px">📌 Закреплён сервер «<?= h(($sub['pin_name'] ?? '') ?: $sub['pin']) ?>». Если он перестанет отвечать, роутер не перейдёт на другой, и домены этой секции не откроются.</div><?php endif; ?>
 								<?php if (!empty($sub['fb'])): ?><div class="notice err" style="margin:0 0 6px">⚠️ Серверы «<?= h($sub['only'] ?? '') ?>» не отвечают — временно работают другие страны. Вернётся сам, когда они оживут.</div><?php endif; ?>
@@ -627,9 +669,10 @@ function render_section(int $i, array $s, array $proxyNames, array $vpnIfaces = 
 			</div>
 		</div>
 		<label class="field">Готовые списки</label>
-		<div class="lists">
+		<div class="lists-note muted" style="display:none;margin-bottom:4px"></div>
+		<div class="lists" data-lists>
 			<?php foreach ($all as $l): ?>
-				<label><input type="checkbox" name="sections[<?= $i ?>][community][]" value="<?= h($l) ?>" <?= in_array($l, $s['community'], true) ? 'checked' : '' ?>> <?= h($l) ?></label>
+				<label><input type="checkbox" name="sections[<?= $i ?>][community][]" value="<?= h($l) ?>" <?= in_array($l, $s['community'], true) ? 'checked' : '' ?> onchange="checkLists(this)"> <?= h($l) ?></label>
 			<?php endforeach; ?>
 		</div>
 	</div>
@@ -775,6 +818,31 @@ panel_header($router['name']);
 			});
 		}
 		// Галочка страны дописывает или убирает её в поле «Только эти страны»
+		// Готовые списки — как в podkop: региональный один; с russia_inside — только совместимые, остальные снимаются
+		const REGIONAL = ["russia_inside","russia_outside","ukraine_inside"];
+		const WITH_RI = ["russia_inside","meta","twitter","discord","telegram","cloudflare","google_ai","google_play","hetzner","ovh","hodca","roblox","digitalocean","cloudfront"];
+		function checkLists(box) {
+			const wrap = box.closest('[data-lists]'), note = wrap.previousElementSibling;
+			const boxes = Array.from(wrap.querySelectorAll('input[type=checkbox]'));
+			const msgs = [];
+			if (box.checked && REGIONAL.includes(box.value)) {
+				const other = boxes.filter(b => b !== box && b.checked && REGIONAL.includes(b.value));
+				other.forEach(b => { b.checked = false; });
+				if (other.length) msgs.push('Региональные списки нельзя выбирать вместе — снят: ' + other.map(b => b.value).join(', ') + '.');
+			}
+			const ri = boxes.find(b => b.value === 'russia_inside' && b.checked);
+			if (ri) {
+				const bad = boxes.filter(b => b.checked && !WITH_RI.includes(b.value) && !REGIONAL.includes(b.value));
+				bad.forEach(b => { b.checked = false; });
+				if (bad.length) msgs.push(bad.map(b => b.value).join(', ') + ' уже входят в russia_inside — сняты. Вместе с russia_inside можно только: ' + WITH_RI.slice(1).join(', ') + '.');
+			}
+			if (note) { note.textContent = msgs.join(' '); note.style.display = msgs.length ? '' : 'none'; note.style.color = '#c9372c'; }
+		}
+		function renameSection(btn) {
+			const inp = btn.nextElementSibling;
+			inp.style.display = inp.style.display === 'none' ? '' : 'none';
+			if (inp.style.display === '') { inp.value = inp.value || btn.previousElementSibling.textContent; inp.focus(); inp.select(); } else { inp.value = ''; }
+		}
 		function toggleCountry(box) {
 			const inp = box.closest('[data-src]').querySelector('[data-only]');
 			const list = inp.value.split(',').map(x => x.trim()).filter(Boolean);
