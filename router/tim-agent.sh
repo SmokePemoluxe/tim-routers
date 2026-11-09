@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.4"
+VERSION="2.5"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -1816,7 +1816,7 @@ t_update() {
 	rm -rf "$d"
 	mkdir -p "$d"
 	for f in tim-agent.sh inet-watchdog.sh; do
-		if ! curl -sfL -m 90 -o "$d/$f" "$REPO_RAW/$ref/router/$f"; then
+		if ! curl -4 -sfL -m 90 -o "$d/$f" "$REPO_RAW/$ref/router/$f" && ! curl -sfL -m 90 -o "$d/$f" "$REPO_RAW/$ref/router/$f"; then
 			add_result "$id" false "не удалось скачать $f версии $ref с GitHub"
 			return
 		fi

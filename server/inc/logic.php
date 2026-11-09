@@ -18,8 +18,13 @@ const GITHUB_REPO = 'SmokePemoluxe/tim-routers';
 // Команда установки на новый роутер — с адресом этого сервера
 function install_command(string $invite = ''): string
 {
-	return 'wget -O /tmp/tr-install.sh https://raw.githubusercontent.com/' . GITHUB_REPO . '/main/router/install.sh && sh /tmp/tr-install.sh '
-		. rtrim((string)cfg('base_url'), '/') . ($invite !== '' ? ' --code ' . $invite : '');
+	// Сначала GitHub по IPv4 (у многих роутеров IPv6 есть «наполовину» — wget падает с «Operation not permitted»),
+	// если не вышло — тот же файл через этот сервер (dl.php берёт его с GitHub)
+	$srv = rtrim((string)cfg('base_url'), '/');
+	$gh = 'https://raw.githubusercontent.com/' . GITHUB_REPO . '/main/router/install.sh';
+	$mirror = '"' . $srv . '/dl.php?f=install.sh"';
+	return 'cd /tmp && { wget -4 -q -O tr-install.sh ' . $gh . ' || wget -4 -q -O tr-install.sh ' . $mirror . ' || wget -q -O tr-install.sh ' . $mirror . '; } && sh tr-install.sh '
+		. $srv . ($invite !== '' ? ' --code ' . $invite : '');
 }
 
 // ---------- Форматирование ----------

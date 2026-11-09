@@ -200,7 +200,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 			exit;
 		}
 	} elseif ($_POST['action'] === 'update_all') {
-		$ref = is_service() ? 'main' : trim((string)($_POST['ref'] ?? ''));
+		$ref = is_service() ? 'main' : (trim((string)($_POST['ref'] ?? '')) ?: 'main');
 		if (preg_match('/^[A-Za-z0-9._-]{1,40}$/', $ref)) {
 			$ids = array_column(rows("SELECT id FROM routers WHERE status = 'active' AND user_id = ?", [cur_uid()]), 'id');
 			foreach ($ids as $id) {
@@ -310,7 +310,7 @@ function block_routers(array $routers): string
 			<h2>Роутеры <span class="muted">🟢 всё работает: <?= $cnt['🟢'] ?> · 🔴 на связи, но есть проблема: <?= $cnt['🔴'] ?> · ⚫ не на связи: <?= $cnt['⚫'] ?></span></h2>
 			<?php $nOld = count(array_filter($routers, fn($x) => router_outdated(rinfo($x)))); if ($nOld): ?>
 				<form method="post" class="notice row" style="justify-content:space-between" onsubmit="return confirm('Обновить скрипты (агент и сторож) на всех роутерах?')">
-					<?= csrf_field() ?><span>⚠️ На роутерах (<?= $nOld ?>) устарели скрипты или podkop.</span>
+					<?= csrf_field() ?><input type="hidden" name="ref" value="main"><span>⚠️ На роутерах (<?= $nOld ?>) устарели скрипты или podkop.</span>
 					<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
 				</form>
 			<?php endif; ?>

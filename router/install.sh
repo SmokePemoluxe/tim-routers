@@ -1,7 +1,8 @@
 #!/bin/sh
 # Установка одной командой: podkop (если его нет) + сторож интернета + агент управления.
 #
-#   wget -O /tmp/tr-install.sh https://raw.githubusercontent.com/SmokePemoluxe/tim-routers/main/router/install.sh && sh /tmp/tr-install.sh АДРЕС-СЕРВЕРА
+#   cd /tmp && { wget -4 -q -O tr-install.sh https://raw.githubusercontent.com/SmokePemoluxe/tim-routers/main/router/install.sh || wget -q -O tr-install.sh "АДРЕС-СЕРВЕРА/dl.php?f=install.sh"; } && sh tr-install.sh АДРЕС-СЕРВЕРА
+#   (готовая команда с кодом — в кабинете или панели)
 #
 # АДРЕС-СЕРВЕРА выдаёт панель («Как подключить роутер»). Без него установщик спросит адрес сам.
 # Флаги:
@@ -19,6 +20,39 @@ CODE=""
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# Скачать: сначала по IPv4 (частая причина «Operation not permitted» — IPv6 без маршрута), потом как есть, потом curl
+fetch_url() { # адрес файл
+	wget -4 -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
+	wget -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
+	command -v curl >/dev/null 2>&1 && curl -4 -sfL -m 60 -o "$2" "$1" && [ -s "$2" ] && return 0
+	rm -f "$2"
+	return 1
+}
+
+# Наш скрипт: с GitHub, а если не вышло — через сервер (он берёт тот же файл с GitHub)
+fetch_script() { # имя файл
+	fetch_url "$RAW/$1" "$2" && return 0
+	if [ -n "$SERVER" ] && fetch_url "$SERVER/dl.php?f=$1" "$2"; then
+		echo "($1 — через сервер: GitHub с роутера недоступен)"
+		return 0
+	fi
+	return 1
+}
+
+# Что мешает скачивать — чтобы было что прислать в поддержку
+net_diag() {
+	echo "--- Диагностика сети"
+	echo "время роутера: $(date)"
+	echo "маршрут по умолчанию: $(ip route show default 2>/dev/null | head -n 1)"
+	echo "IPv6 по умолчанию: $(ip -6 route show default 2>/dev/null | head -n 1)"
+	echo "DNS github: $(nslookup raw.githubusercontent.com 2>/dev/null | awk '/^Address/ {print $NF}' | tr '\n' ' ')"
+	if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then echo "пинг 8.8.8.8: есть"; else echo "пинг 8.8.8.8: НЕТ"; fi
+	for p in banip adblock adblock-fast https-dns-proxy podkop; do
+		[ -x "/etc/init.d/$p" ] && echo "установлен: $p (может ограничивать исходящие соединения)"
+	done
+	echo "правил drop/reject в исходящем фильтре: $(nft list chain inet fw4 output 2>/dev/null | grep -ciE 'drop|reject')"
+}
 die() { printf '\n\033[31mОшибка: %s\033[0m\n' "$*"; exit 1; }
 
 while [ $# -gt 0 ]; do
@@ -131,7 +165,10 @@ echo "OK"
 # --- 2. podkop ---
 say "2/4 podkop"
 run_podkop_installer() {
-	wget -q -O /tmp/podkop-install.sh "$PODKOP_INSTALLER" || die "не удалось скачать установщик podkop с GitHub"
+	if ! fetch_url "$PODKOP_INSTALLER" /tmp/podkop-install.sh; then
+		net_diag
+		die "не удалось скачать установщик podkop с GitHub (podkop ставится только оттуда) — пришлите в поддержку текст выше"
+	fi
 	sh /tmp/podkop-install.sh
 	rm -f /tmp/podkop-install.sh
 	[ -x /etc/init.d/podkop ] || die "podkop не установился"
@@ -179,7 +216,10 @@ d=/tmp/tr-install
 rm -rf "$d"
 mkdir -p "$d"
 for f in inet-watchdog.sh tim-agent.sh; do
-	wget -q -O "$d/$f" "$RAW/$f" || die "не удалось скачать $f"
+	if ! fetch_script "$f" "$d/$f"; then
+		net_diag
+		die "не удалось скачать $f ни с GitHub, ни через сервер — пришлите в поддержку текст выше"
+	fi
 	if ! head -n 1 "$d/$f" | grep -q '^#!/bin/sh' || ! sh -n "$d/$f"; then
 		die "$f скачался повреждённым — попробуйте ещё раз"
 	fi
