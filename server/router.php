@@ -12,6 +12,8 @@ const SUB_OPTS_AGENT = '2.2'; // выбор стран, закрепление, 
 const SUB_STICKY_AGENT = '2.3';
 const RENAME_AGENT = '2.6'; // переименование секций // «держаться за текущий сервер»
 const DL_PROXY_AGENT = '2.7'; // «скачивать списки через прокси/VPN»
+const UPD_INT_AGENT = '2.8'; // частота обновления списков
+const UPDATE_INTERVALS = ['1h' => 'каждый час', '3h' => 'каждые 3 часа', '12h' => 'каждые 12 часов', '1d' => 'раз в день', '3d' => 'раз в 3 дня'];
 
 $rid = (int)($_GET['id'] ?? 0);
 $router = router_for_page($rid); // чужой роутер — «не найден»
@@ -27,6 +29,7 @@ $subOptsOk = version_compare((string)($info['agent'] ?? '0'), SUB_OPTS_AGENT, '>
 $subStickyOk = version_compare((string)($info['agent'] ?? '0'), SUB_STICKY_AGENT, '>=');
 $renameOk = version_compare((string)($info['agent'] ?? '0'), RENAME_AGENT, '>=');
 $dlProxyOk = version_compare((string)($info['agent'] ?? '0'), DL_PROXY_AGENT, '>=');
+$updIntOk = version_compare((string)($info['agent'] ?? '0'), UPD_INT_AGENT, '>=');
 
 // Кто смотрит: владелец; администратор с разрешением пользователя (поддержка); администратор без разрешения — только просмотр
 $acc = router_access($router);
@@ -210,6 +213,17 @@ function build_payload(array $sections, array $settings): array
 		}
 		$payload['settings']['dl_proxy'] = $settings['dl_proxy'] ? '1' : '0';
 		$payload['settings']['dl_proxy_section'] = $settings['dl_proxy'] ? $dl : '';
+	}
+
+	// Частота обновления списков
+	global $updIntOk;
+	unset($payload['settings']['update_interval']);
+	if ($updIntOk) {
+		if (!isset(UPDATE_INTERVALS[$settings['update_interval']])) {
+			$errors[] = 'Обновление списков: выберите частоту';
+		} else {
+			$payload['settings']['update_interval'] = $settings['update_interval'];
+		}
 	}
 
 	// Готовые списки: те же правила, что в podkop
@@ -501,6 +515,7 @@ $settings = [
 	'bootstrap_dns_server' => (string)($ps['bootstrap_dns_server'] ?? '1.1.1.1'),
 	'dl_proxy' => !empty($ps['dl_proxy']),
 	'dl_proxy_section' => (string)($ps['dl_proxy_section'] ?? ''),
+	'update_interval' => (string)($ps['update_interval'] ?? '') ?: '1d',
 ];
 $sections = sections_from_db($rid);
 
@@ -518,6 +533,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !isset($_POST['action'])) {
 			'bootstrap_dns_server' => trim((string)($_POST['bootstrap_dns_server'] ?? '')),
 			'dl_proxy' => !empty($_POST['dl_proxy']),
 			'dl_proxy_section' => trim((string)($_POST['dl_proxy_section'] ?? '')),
+			'update_interval' => (string)($_POST['update_interval'] ?? ''),
 		];
 		$sections = sections_from_post($rid);
 		[$payload, $errors] = build_payload($sections, $settings);
@@ -831,7 +847,14 @@ panel_header($router['name']);
 						<?php endif; ?>
 					</select>
 				</span>
-				<span class="muted" style="font-size:13px"><?= $dlProxyOk ? 'Готовые и удалённые списки podkop будут скачиваться через выбранную секцию — если их сайты недоступны напрямую.' : '⚠️ Нужно обновить скрипты роутера: «🛠 Управление» → «⬆️ Обновить скрипты».' ?></span>
+				<label <?= $updIntOk ? '' : 'title="Нужно обновить скрипты роутера (агент ' . UPD_INT_AGENT . ')"' ?>>Обновлять списки
+					<select name="update_interval" <?= $updIntOk ? '' : 'disabled' ?>>
+						<?php foreach (UPDATE_INTERVALS as $v => $l): ?>
+							<option value="<?= $v ?>" <?= $settings['update_interval'] === $v ? 'selected' : '' ?>><?= $l ?></option>
+						<?php endforeach; ?>
+					</select>
+				</label>
+				<span class="muted" style="font-size:13px"><?= $updIntOk ? 'Через прокси/VPN — если сайты списков недоступны напрямую. Частота — как часто podkop заново скачивает готовые и удалённые списки.' : '⚠️ Чтобы менять эти настройки, обновите скрипты роутера: «🛠 Управление» → «⬆️ Обновить скрипты».' ?></span>
 			</div>
 		</div>
 

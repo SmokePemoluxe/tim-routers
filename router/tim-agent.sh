@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.7"
+VERSION="2.8"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -272,7 +272,7 @@ info_json() {
 	board=$(ubus call system board 2>/dev/null)
 	sb=false
 	pidof sing-box >/dev/null && sb=true
-	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s,"dl_proxy":%s,"dl_proxy_section":%s},"watchdog":' \
+	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s,"dl_proxy":%s,"dl_proxy_section":%s,"update_interval":%s},"watchdog":' \
 		"$(json_str "$VERSION")" \
 		"$(json_str "$(jsonfilter -s "$board" -e '@.model' 2>/dev/null)")" \
 		"$(json_str "$DISTRIB_RELEASE")" \
@@ -292,7 +292,8 @@ info_json() {
 		"$(json_str "$(uci -q get podkop.settings.dns_server)")" \
 		"$(json_str "$(uci -q get podkop.settings.bootstrap_dns_server)")" \
 		"$([ "$(uci -q get podkop.settings.download_lists_via_proxy)" = 1 ] && echo true || echo false)" \
-		"$(json_str "$(uci -q get podkop.settings.download_lists_via_proxy_section)")"
+		"$(json_str "$(uci -q get podkop.settings.download_lists_via_proxy_section)")" \
+		"$(json_str "$(uci -q get podkop.settings.update_interval)")"
 	watchdog_json
 	printf '}'
 }
@@ -1834,6 +1835,13 @@ $d"
 	elif [ "$v" = 0 ]; then
 		uci set podkop.settings.download_lists_via_proxy=0
 	fi
+	# Как часто podkop обновляет списки (значения — как в LuCI podkop)
+	v=$(task_field settings.update_interval)
+	case "$v" in
+		'') ;;
+		1h|3h|12h|1d|3d) uci set "podkop.settings.update_interval=$v" ;;
+		*) errors="$errors; частота обновления списков «$v» не поддерживается" ;;
+	esac
 
 	# --- Порядок секций (важен: домен из двух секций обработает первая) ---
 	uci -q reorder podkop.settings=0
