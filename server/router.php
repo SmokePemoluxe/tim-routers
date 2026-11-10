@@ -11,6 +11,7 @@ const MIN_AGENT = '2.0';
 const SUB_OPTS_AGENT = '2.2'; // выбор стран, закрепление, переключение сервера
 const SUB_STICKY_AGENT = '2.3';
 const RENAME_AGENT = '2.6'; // переименование секций // «держаться за текущий сервер»
+const DL_PROXY_AGENT = '2.7'; // «скачивать списки через прокси/VPN»
 
 $rid = (int)($_GET['id'] ?? 0);
 $router = router_for_page($rid); // чужой роутер — «не найден»
@@ -25,6 +26,7 @@ $agentOk = version_compare((string)($info['agent'] ?? '0'), MIN_AGENT, '>=');
 $subOptsOk = version_compare((string)($info['agent'] ?? '0'), SUB_OPTS_AGENT, '>=');
 $subStickyOk = version_compare((string)($info['agent'] ?? '0'), SUB_STICKY_AGENT, '>=');
 $renameOk = version_compare((string)($info['agent'] ?? '0'), RENAME_AGENT, '>=');
+$dlProxyOk = version_compare((string)($info['agent'] ?? '0'), DL_PROXY_AGENT, '>=');
 
 // Кто смотрит: владелец; администратор с разрешением пользователя (поддержка); администратор без разрешения — только просмотр
 $acc = router_access($router);
@@ -180,6 +182,35 @@ function build_payload(array $sections, array $settings): array
 		}
 	}
 	unset($s);
+
+	// Скачивание списков через прокси/VPN: только через существующую секцию «прокси» или «VPN»
+	global $dlProxyOk;
+	unset($payload['settings']['dl_proxy'], $payload['settings']['dl_proxy_section']);
+	if ($dlProxyOk) {
+		$dl = $settings['dl_proxy_section'];
+		if (isset($renames[$dl])) {
+			$dl = $renames[$dl];
+		}
+		if ($settings['dl_proxy']) {
+			$target = null;
+			foreach ($sections as $s) {
+				if ($s['orig'] !== '' && ($s['orig'] === $settings['dl_proxy_section'])) {
+					$target = $s;
+				}
+			}
+			if ($dl === '') {
+				$errors[] = 'Скачивание списков через прокси/VPN: выберите секцию';
+			} elseif (!$target) {
+				$errors[] = "Скачивание списков через прокси/VPN: секции {$dl} нет";
+			} elseif ($target['delete']) {
+				$errors[] = "Секция {$target['orig']} выбрана для скачивания списков — сначала выберите другую секцию или снимите галочку";
+			} elseif (!in_array($target['type'], ['proxy', 'vpn'], true)) {
+				$errors[] = "Скачивать списки можно только через секцию «прокси» или «VPN», а {$dl} — нет";
+			}
+		}
+		$payload['settings']['dl_proxy'] = $settings['dl_proxy'] ? '1' : '0';
+		$payload['settings']['dl_proxy_section'] = $settings['dl_proxy'] ? $dl : '';
+	}
 
 	// Готовые списки: те же правила, что в podkop
 	foreach ($sections as $s) {
@@ -468,6 +499,8 @@ $settings = [
 	'dns_type' => (string)($ps['dns_type'] ?? 'doh'),
 	'dns_server' => (string)($ps['dns_server'] ?? '1.1.1.1'),
 	'bootstrap_dns_server' => (string)($ps['bootstrap_dns_server'] ?? '1.1.1.1'),
+	'dl_proxy' => !empty($ps['dl_proxy']),
+	'dl_proxy_section' => (string)($ps['dl_proxy_section'] ?? ''),
 ];
 $sections = sections_from_db($rid);
 
@@ -483,6 +516,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !isset($_POST['action'])) {
 			'dns_type' => (string)($_POST['dns_type'] ?? ''),
 			'dns_server' => trim((string)($_POST['dns_server'] ?? '')),
 			'bootstrap_dns_server' => trim((string)($_POST['bootstrap_dns_server'] ?? '')),
+			'dl_proxy' => !empty($_POST['dl_proxy']),
+			'dl_proxy_section' => trim((string)($_POST['dl_proxy_section'] ?? '')),
 		];
 		$sections = sections_from_post($rid);
 		[$payload, $errors] = build_payload($sections, $settings);
@@ -782,6 +817,21 @@ panel_header($router['name']);
 				</div>
 				<div><label class="field">DNS-сервер</label><input type="text" name="dns_server" value="<?= h($settings['dns_server']) ?>"></div>
 				<div><label class="field">Bootstrap DNS-сервер</label><input type="text" name="bootstrap_dns_server" value="<?= h($settings['bootstrap_dns_server']) ?>"></div>
+			</div>
+			<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center">
+				<label <?= $dlProxyOk ? '' : 'title="Нужно обновить скрипты роутера (агент ' . DL_PROXY_AGENT . ')"' ?>><input type="checkbox" name="dl_proxy" value="1" id="dl_proxy" <?= $settings['dl_proxy'] ? 'checked' : '' ?> <?= $dlProxyOk ? '' : 'disabled' ?> onchange="document.getElementById('dl_proxy_box').style.display = this.checked ? '' : 'none'"> Скачивать списки через прокси/VPN</label>
+				<span id="dl_proxy_box" style="<?= $settings['dl_proxy'] ? '' : 'display:none' ?>">через секцию
+					<select name="dl_proxy_section" <?= $dlProxyOk ? '' : 'disabled' ?>>
+						<option value="">— выберите —</option>
+						<?php foreach ($proxyNames as $pn): ?>
+							<option value="<?= h($pn) ?>" <?= $settings['dl_proxy_section'] === $pn ? 'selected' : '' ?>><?= h($pn) ?></option>
+						<?php endforeach; ?>
+						<?php if ($settings['dl_proxy_section'] !== '' && !in_array($settings['dl_proxy_section'], $proxyNames, true)): ?>
+							<option value="<?= h($settings['dl_proxy_section']) ?>" selected><?= h($settings['dl_proxy_section']) ?> (не прокси/VPN)</option>
+						<?php endif; ?>
+					</select>
+				</span>
+				<span class="muted" style="font-size:13px"><?= $dlProxyOk ? 'Готовые и удалённые списки podkop будут скачиваться через выбранную секцию — если их сайты недоступны напрямую.' : '⚠️ Нужно обновить скрипты роутера: «🛠 Управление» → «⬆️ Обновить скрипты».' ?></span>
 			</div>
 		</div>
 

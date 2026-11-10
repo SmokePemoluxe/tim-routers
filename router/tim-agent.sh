@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.6"
+VERSION="2.7"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -272,7 +272,7 @@ info_json() {
 	board=$(ubus call system board 2>/dev/null)
 	sb=false
 	pidof sing-box >/dev/null && sb=true
-	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s},"watchdog":' \
+	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s,"dl_proxy":%s,"dl_proxy_section":%s},"watchdog":' \
 		"$(json_str "$VERSION")" \
 		"$(json_str "$(jsonfilter -s "$board" -e '@.model' 2>/dev/null)")" \
 		"$(json_str "$DISTRIB_RELEASE")" \
@@ -290,7 +290,9 @@ info_json() {
 		"$sb" \
 		"$(json_str "$(uci -q get podkop.settings.dns_type)")" \
 		"$(json_str "$(uci -q get podkop.settings.dns_server)")" \
-		"$(json_str "$(uci -q get podkop.settings.bootstrap_dns_server)")"
+		"$(json_str "$(uci -q get podkop.settings.bootstrap_dns_server)")" \
+		"$([ "$(uci -q get podkop.settings.download_lists_via_proxy)" = 1 ] && echo true || echo false)" \
+		"$(json_str "$(uci -q get podkop.settings.download_lists_via_proxy_section)")"
 	watchdog_json
 	printf '}'
 }
@@ -1132,7 +1134,23 @@ valid_domain() {
 # Применение настроек podkop. Если podkop уже работает — мягкий reload: он не трогает DNS роутера,
 # и устройства не получают «прямые» адреса на время перезапуска (их потом не исправить без
 # переподключения). Полный restart — только если podkop не работает.
+# «Скачивать списки через прокси/VPN»: секция должна существовать и быть прокси или VPN,
+# иначе podkop собрал бы неработающий конфиг — тогда галочку снимаем
+dl_proxy_ok() {
+	[ "$(uci -q get podkop.settings.download_lists_via_proxy)" = 1 ] || return 0
+	dl_s=$(uci -q get podkop.settings.download_lists_via_proxy_section)
+	is_section "$dl_s" && case "$(opt "$dl_s" connection_type)" in proxy|vpn) return 0 ;; esac
+	return 1
+}
+dl_proxy_guard() {
+	dl_proxy_ok && return 1
+	uci set podkop.settings.download_lists_via_proxy=0
+	log "секции «$dl_s» для скачивания списков больше нет — скачивание через прокси выключено"
+	return 0
+}
+
 podkop_apply() {
+	dl_proxy_guard
 	uci commit podkop
 	PODKOP_CHANGED=1
 	case " $(uci -q get dhcp.@dnsmasq[0].server) " in
@@ -1150,6 +1168,7 @@ podkop_apply() {
 
 # Для задач, которым не нужна проверка сразу: перезапуск podkop один раз после всех задач
 podkop_apply_later() {
+	dl_proxy_guard
 	uci commit podkop
 	NEED_RESTART=1
 	PODKOP_CHANGED=1
@@ -1426,6 +1445,7 @@ section_rename() { # старое новое
 	for sr_f in "$RUN_DIR/sub_$1".*; do
 		[ -e "$sr_f" ] && mv "$sr_f" "$RUN_DIR/sub_$2.${sr_f##*/sub_$1.}"
 	done
+	[ "$(uci -q get podkop.settings.download_lists_via_proxy_section)" = "$1" ] && uci set "podkop.settings.download_lists_via_proxy_section=$2"
 	PODKOP_CHANGED=1
 	log "секция $1 переименована в $2"
 }
@@ -1801,6 +1821,20 @@ $d"
 		SEC_IDX=$((SEC_IDX + 1))
 	done
 
+	# --- Скачивание списков через прокси/VPN (поле есть только у сайта с этой настройкой) ---
+	v=$(task_field settings.dl_proxy)
+	if [ "$v" = 1 ]; then
+		v=$(task_field settings.dl_proxy_section)
+		if is_section "$v" && case "$(opt "$v" connection_type)" in proxy|vpn) true ;; *) false ;; esac; then
+			uci set podkop.settings.download_lists_via_proxy=1
+			uci set "podkop.settings.download_lists_via_proxy_section=$v"
+		else
+			errors="$errors; скачивание списков: секции $v нет или она не через прокси/VPN — настройка не изменена"
+		fi
+	elif [ "$v" = 0 ]; then
+		uci set podkop.settings.download_lists_via_proxy=0
+	fi
+
 	# --- Порядок секций (важен: домен из двух секций обработает первая) ---
 	uci -q reorder podkop.settings=0
 	pos=1
@@ -2111,6 +2145,8 @@ run() {
 		[ "$TASKS_DONE" = 1 ] && sync_once
 		[ "$RESTART_FOR_UPDATE" = 1 ] && exit 0
 		if [ "$STATUS" = "active" ] && sync_lock; then
+			# Секцию для скачивания списков могли удалить в LuCI
+			dl_proxy_guard && podkop_apply
 			subs_tick
 			sync_unlock
 		fi
