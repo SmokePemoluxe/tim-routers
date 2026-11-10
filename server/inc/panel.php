@@ -190,6 +190,21 @@ function panel_footer(): void
 				.catch(function () {});
 		}
 	}
+	// Счётчик символов у полей с пределом (<textarea data-max>): при превышении — красным и кнопка неактивна
+	document.querySelectorAll('textarea[data-max]').forEach(function (ta) {
+		var max = +ta.getAttribute('data-max'), c = document.createElement('div');
+		c.className = 'muted'; c.style.cssText = 'font-size:12px;text-align:right;margin-top:2px';
+		ta.insertAdjacentElement('afterend', c);
+		var btns = ta.form ? ta.form.querySelectorAll('button.primary') : [];
+		function upd() {
+			var n = Array.from(ta.value.trim()).length, over = n > max;
+			c.textContent = over ? 'Слишком длинно: ' + n + ' из ' + max + ' символов — сократите на ' + (n - max) : n + ' / ' + max;
+			c.style.color = over ? '#c0392b' : '';
+			c.style.fontWeight = over ? '600' : '';
+			btns.forEach(function (b) { b.disabled = over; });
+		}
+		ta.addEventListener('input', upd); upd();
+	});
 	// Кнопка «Копировать» под командами и кодами (<pre data-copy>)
 	document.querySelectorAll('pre[data-copy]').forEach(function (pre) {
 		var btn = document.createElement('button');

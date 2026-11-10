@@ -128,9 +128,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 				exit;
 			case 'reply':
 				$t = row('SELECT * FROM tickets WHERE id = ? AND user_id = ?', [(int)($_POST['tid'] ?? 0), $uid]);
-				$text = trim((string)($_POST['text'] ?? ''));
-				if ($t && $text !== '') {
-					q('INSERT INTO ticket_msgs (ticket_id, from_admin, ts, text) VALUES (?, 1, ?, ?)', [$t['id'], time(), mb_substr($text, 0, 5000)]);
+				$text = trim(str_replace("\r\n", "\n", (string)($_POST['text'] ?? '')));
+				if ($t && mb_strlen($text) > MSG_MAX) {
+					$msg = ['err', 'Ответ длиннее ' . MSG_MAX . ' символов (сейчас ' . mb_strlen($text) . ') — сократите его или отправьте частями.'];
+					$replyDraft = $text;
+				} elseif ($t && $text !== '') {
+					q('INSERT INTO ticket_msgs (ticket_id, from_admin, ts, text) VALUES (?, 1, ?, ?)', [$t['id'], time(), $text]);
 					q("UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?", [!empty($_POST['close']) ? 'closed' : 'answered', time(), $t['id']]);
 					notify_user($uid, '💬 <b>Ответ поддержки</b> по обращению «' . h($t['subject']) . "»:\n" . h(mb_substr($text, 0, 1500)), null);
 					header('Location: users.php?id=' . $uid . '&t=' . $t['id']);
@@ -198,7 +201,7 @@ panel_header('Пользователи');
 			<div id="ticket-msgs" data-poll="users.php?id=<?= $id ?>&amp;t=<?= (int)$t['id'] ?>&amp;partial=msgs"><?= ticket_msgs_html((int)$t['id'], true) ?></div>
 			<form method="post" style="margin-top:8px">
 				<?= csrf_field() ?><input type="hidden" name="uid" value="<?= $id ?>"><input type="hidden" name="tid" value="<?= (int)$t['id'] ?>">
-				<textarea name="text" rows="4" placeholder="Ответ пользователю (придёт ему в кабинет и во ВКонтакте, если подключён)" style="font-family:inherit"></textarea>
+				<textarea name="text" rows="4" placeholder="Ответ пользователю (придёт ему в кабинет и во ВКонтакте, если подключён)" data-max="<?= MSG_MAX ?>" style="font-family:inherit"><?= h($replyDraft ?? '') ?></textarea>
 				<p class="row"><button name="action" value="reply" class="primary">Ответить</button>
 					<label class="check"><input type="checkbox" name="close" value="1"> и закрыть обращение</label>
 					<button name="action" value="close">Закрыть без ответа</button></p>

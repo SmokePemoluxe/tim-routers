@@ -30,11 +30,7 @@ function support_grant(int $days): void
 }
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
-	$text = trim((string)($_POST['text'] ?? ''));
-	$rl = kv_get(okey('ticket_rl'), ['n' => 0, 'ts' => time()]);
-	if (time() - (int)$rl['ts'] > 86400) {
-		$rl = ['n' => 0, 'ts' => time()];
-	}
+	$text = trim(str_replace("\r\n", "\n", (string)($_POST['text'] ?? '')));
 	if (csrf_ok() && isset($_POST['grant']) && $ticket) {
 		support_grant(3);
 		header('Location: support.php?t=' . $ticket['id']);
@@ -42,10 +38,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 	}
 	if (!csrf_ok()) {
 		$err = 'Форма устарела — обновите страницу.';
-	} elseif (mb_strlen($text) < 5) {
-		$err = 'Опишите, пожалуйста, что случилось.';
-	} elseif ($rl['n'] >= 30) {
-		$err = 'Слишком много сообщений за сутки.';
+	} elseif ($text === '') {
+		$err = 'Напишите сообщение.';
+	} elseif (mb_strlen($text) > MSG_MAX) {
+		$err = 'Сообщение длиннее ' . MSG_MAX . ' символов (сейчас ' . mb_strlen($text) . ') — сократите его или отправьте частями.';
 	} elseif (isset($_POST['new'])) {
 		$subject = mb_substr(trim((string)($_POST['subject'] ?? '')), 0, 120) ?: mb_substr($text, 0, 60);
 		$rid = (int)($_POST['router'] ?? 0);
@@ -54,19 +50,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 		}
 		q("INSERT INTO tickets (user_id, router_id, subject, status, created_at, updated_at) VALUES (?, ?, ?, 'open', ?, ?)", [$uid, $rid ?: null, $subject, time(), time()]);
 		$tid = (int)db()->lastInsertId();
-		q('INSERT INTO ticket_msgs (ticket_id, from_admin, ts, text) VALUES (?, 0, ?, ?)', [$tid, time(), mb_substr($text, 0, 5000)]);
+		q('INSERT INTO ticket_msgs (ticket_id, from_admin, ts, text) VALUES (?, 0, ?, ?)', [$tid, time(), $text]);
 		if (!empty($_POST['grant'])) {
 			support_grant(3);
 		}
-		$rl['n']++;
-		kv_set(okey('ticket_rl'), $rl);
 		header('Location: support.php?t=' . $tid . '&sent=1');
 		exit;
 	} elseif ($ticket) {
-		q('INSERT INTO ticket_msgs (ticket_id, from_admin, ts, text) VALUES (?, 0, ?, ?)', [$ticket['id'], time(), mb_substr($text, 0, 5000)]);
+		q('INSERT INTO ticket_msgs (ticket_id, from_admin, ts, text) VALUES (?, 0, ?, ?)', [$ticket['id'], time(), $text]);
 		q("UPDATE tickets SET status = 'open', updated_at = ? WHERE id = ?", [time(), $ticket['id']]);
-		$rl['n']++;
-		kv_set(okey('ticket_rl'), $rl);
 		header('Location: support.php?t=' . $ticket['id'] . '&sent=1');
 		exit;
 	}
@@ -88,7 +80,7 @@ panel_header('Поддержка');
 				<form method="post" style="display:inline"><?= csrf_field() ?><button name="grant" value="1">Открыть доступ на 3 дня</button></form><?php endif; ?></div>
 			<form method="post" style="margin-top:10px">
 				<?= csrf_field() ?>
-				<textarea name="text" rows="4" placeholder="Ответить" style="font-family:inherit"></textarea>
+				<textarea name="text" rows="4" placeholder="Ответить" data-max="<?= MSG_MAX ?>" style="font-family:inherit"><?= $err && !isset($_POST['new']) ? h($text ?? '') : '' ?></textarea>
 				<p><button class="primary">Отправить</button> &nbsp; <a href="support.php">← Все обращения</a></p>
 			</form>
 		</div>
@@ -104,7 +96,7 @@ panel_header('Поддержка');
 					<label class="field">Роутер</label>
 					<select name="router"><option value="0">— не важно —</option><?php foreach ($myRouters as $r): ?><option value="<?= (int)$r['id'] ?>"><?= h($r['name']) ?></option><?php endforeach; ?></select>
 				<?php endif; ?>
-				<label class="field">Что случилось</label><textarea name="text" rows="5" required style="font-family:inherit"></textarea>
+				<label class="field">Что случилось</label><textarea name="text" rows="5" required data-max="<?= MSG_MAX ?>" style="font-family:inherit"><?= $err && isset($_POST['new']) ? h($text ?? '') : '' ?></textarea>
 				<p><label class="check"><input type="checkbox" name="grant" value="1"> <span>Открыть поддержке доступ к настройкам моих роутеров на 3 дня — чтобы она могла посмотреть и исправить сама</span></label></p>
 				<p><button class="primary">Отправить</button></p>
 			</form>
