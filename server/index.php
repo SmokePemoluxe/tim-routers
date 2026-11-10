@@ -189,8 +189,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 		$name = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)($_POST['name'] ?? ''))), 0, 40);
 		if ($name === '') {
 			$notice = 'Укажите имя роутера.';
-		} elseif (is_service() && (int)val("SELECT COUNT(*) FROM routers WHERE user_id = ? AND status = 'active'", [cur_uid()]) >= user_router_limit($me)) {
-			$notice = 'Достигнут лимит роутеров в кабинете (' . user_router_limit($me) . '). Удалите ненужный или напишите в поддержку.';
+		} elseif (is_service() && user_limit_reached($me, (int)val("SELECT COUNT(*) FROM routers WHERE user_id = ? AND status = 'active'", [cur_uid()]))) {
+			$notice = 'В пробный период можно подключить до ' . user_router_limit($me) . ' роутеров. После оплаты подписки ограничения нет.';
 		} else {
 			q("UPDATE routers SET name = ?, status = 'active' WHERE id = ?", [$name, $rid]);
 			event($rid, 'Принят в систему как «' . $name . '»');
@@ -217,8 +217,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 			header('Location: index.php');
 			exit;
 		}
-		if (is_service() && user_router_count(cur_uid()) >= user_router_limit($me)) {
-			$_SESSION['flash'] = 'Достигнут лимит роутеров в кабинете (' . user_router_limit($me) . ').';
+		if (is_service() && user_limit_reached($me, user_router_count(cur_uid()))) {
+			$_SESSION['flash'] = 'В пробный период можно подключить до ' . user_router_limit($me) . ' роутеров. После оплаты подписки ограничения нет.';
 			header('Location: index.php');
 			exit;
 		}
@@ -338,6 +338,7 @@ function block_routers(array $routers): string
 						<span><?= $status ?></span>
 					</div>
 					<div class="muted"><?= router_hw_line(rinfo($r)) ?></div>
+					<?php $devs = array_unique(array_filter(array_map(fn($s) => (string)(sdata($s)['sub']['device'] ?? ''), $sections))); if ($devs): ?><div class="muted">📱 В подписке: <b><?= h(implode(', ', $devs)) ?></b></div><?php endif; ?>
 					<?php if ($old = router_outdated(rinfo($r))): ?><div class="warnline">⚠️ Устарело: <?= h(implode(', ', $old)) ?> — откройте роутер и нажмите «⬆️ Обновить»</div><?php endif; ?>
 					<?php foreach (router_warnings(rinfo($r)) as $w): ?><div class="warnline">⚠️ <?= h($w) ?></div><?php endforeach; ?>
 					<div style="margin-top:4px">
@@ -477,10 +478,10 @@ panel_header('Обзор');
 		<p>Нужно: роутер с OpenWrt и интернетом. podkop ставить заранее не обязательно — установщик поставит его сам и сразу выставит DNS через DoH 1.1.1.1.</p>
 		<div class="notice"><b>Требования к роутеру:</b> OpenWrt 23.05 или новее · оперативная память от 128 МБ · свободно во флеш-памяти от 16 МБ (если podkop ещё не установлен; podkop и sing-box занимают около 15 МБ). Роутеры с флешем 16 МБ и меньше не подходят. Установщик сначала проверит роутер и, если он не подходит, ничего не установит.</div>
 		<p><b>1.</b> Зайти на роутер по SSH: в PowerShell <code>ssh root@192.168.1.1</code> (адрес роутера может отличаться).</p>
-		<?php if (is_service()): ?><p class="muted">Роутеров в кабинете: <?= user_router_count(cur_uid()) ?> из <?= user_router_limit(cur_user()) ?>.</p><?php endif; ?>
+		<?php if (is_service()): ?><p class="muted">Роутеров в кабинете: <?= h(user_limit_text(cur_user(), user_router_count(cur_uid()))) ?>.</p><?php endif; ?>
 		<p><b>2.</b> Вставить одну команду и нажать Enter. В команде — <b>одноразовый код приглашения</b>: без него сервер не примет новый роутер. Код действует <?= INVITE_TTL / 3600 ?> ч и подходит для одного роутера.</p>
 		<?php if ($invFresh): ?>
-			<pre class="cmd"><?= h(install_command($inv['code'])) ?></pre>
+			<pre class="cmd" data-copy><?= h(install_command($inv['code'])) ?></pre>
 			<p class="muted">Код создан <?= ago($inv['ts']) ?>. Для следующего роутера получите новый.</p>
 		<?php endif; ?>
 		<form method="post"><?= csrf_field() ?><button name="action" value="invite"><?= $invFresh ? '🔄 Новый код приглашения' : '🎟 Получить команду с кодом приглашения' ?></button></form>

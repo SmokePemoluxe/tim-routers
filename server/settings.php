@@ -284,7 +284,7 @@ panel_header('Настройки');
 		<?php if ($newCodes): ?>
 			<div class="notice">
 				<b>Резервные коды</b> — на случай, если телефона не будет под рукой. Каждый действует один раз. Сохраните их в менеджер паролей или запишите; больше они не покажутся.
-				<pre class="cmd" style="font-size:15px"><?= h(implode("\n", $newCodes)) ?></pre>
+				<pre class="cmd" data-copy style="font-size:15px"><?= h(implode("\n", $newCodes)) ?></pre>
 			</div>
 		<?php endif; ?>
 

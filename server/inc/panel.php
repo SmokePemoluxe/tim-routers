@@ -190,6 +190,30 @@ function panel_footer(): void
 				.catch(function () {});
 		}
 	}
+	// Кнопка «Копировать» под командами и кодами (<pre data-copy>)
+	document.querySelectorAll('pre[data-copy]').forEach(function (pre) {
+		var btn = document.createElement('button');
+		btn.type = 'button';
+		btn.textContent = '📋 Копировать';
+		btn.style.marginTop = '-6px';
+		btn.addEventListener('click', function () {
+			var text = pre.textContent.trim();
+			var done = function () { btn.textContent = '✅ Скопировано'; setTimeout(function () { btn.textContent = '📋 Копировать'; }, 2000); };
+			if (navigator.clipboard && window.isSecureContext) {
+				navigator.clipboard.writeText(text).then(done, function () { fallback(); });
+			} else {
+				fallback();
+			}
+			function fallback() {
+				var ta = document.createElement('textarea');
+				ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+				document.body.appendChild(ta); ta.select();
+				try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = 'Выделите текст и скопируйте вручную'; }
+				ta.remove();
+			}
+		});
+		pre.insertAdjacentElement('afterend', btn);
+	});
 	setInterval(poll, 15000);
 	document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
 })();

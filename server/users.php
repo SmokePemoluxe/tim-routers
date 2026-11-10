@@ -99,7 +99,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 				$lim = max(0, min(100, (int)($_POST['limit'] ?? 0)));
 				q('UPDATE users SET router_limit = ? WHERE id = ?', [$lim, $uid]);
 				audit("лимит роутеров {$u['email']}: " . ($lim ?: 'по умолчанию'));
-				$msg = ['ok', 'Лимит роутеров: ' . ($lim ?: 'по умолчанию (' . svc()['router_limit'] . ')') . '.'];
+				$msg = ['ok', $lim ? "Лимит роутеров для этого кабинета: $lim." : 'Лимит как у всех: только в пробный период (' . svc()['router_limit'] . '), после оплаты — без ограничений.'];
 				break;
 			case 'verify':
 				q('UPDATE users SET verified_at = COALESCE(verified_at, ?) WHERE id = ?', [time(), $uid]);
@@ -211,7 +211,7 @@ panel_header('Пользователи');
 			<h2>💳 Подписка и баланс</h2>
 			<p>Сейчас: <?= plan_badge($u) ?><br>
 				Баланс: <b><?= money((int)$u['balance']) ?></b><?= daily_kop() > 0 ? ' <span class="muted">· списывается ' . money(daily_kop()) . ' в сутки</span>' : '' ?><br>
-				<span class="muted">Роутеров: <?= user_router_count($id) ?> из <?= user_router_limit($u) ?><?= $u['router_limit'] ? '' : ' (по умолчанию)' ?></span></p>
+				<span class="muted">Роутеров: <?= h(user_limit_text($u, user_router_count($id))) ?></span></p>
 			<form method="post" class="row"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= $id ?>">
 				<input type="text" name="amount" placeholder="сумма, ₽" style="width:110px" inputmode="decimal">
 				<input type="text" name="comment" placeholder="комментарий (например, СБП 08.11)" style="flex:1;min-width:140px">
@@ -224,7 +224,7 @@ panel_header('Пользователи');
 				<button name="action" value="free"><?= $u['free'] ? 'Снять «бесплатно»' : '🎁 Бесплатно для своих (без срока)' ?></button></form>
 			<form method="post" class="row" style="margin-top:8px"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= $id ?>">
 				<input type="text" name="limit" value="<?= (int)$u['router_limit'] ?: '' ?>" placeholder="<?= (int)svc()['router_limit'] ?>" style="width:70px">
-				<button name="action" value="limit">Лимит роутеров</button> <span class="muted">пусто — по умолчанию</span></form>
+				<button name="action" value="limit">Свой лимит роутеров</button> <span class="muted">пусто — как у всех: лимит только в пробный период</span></form>
 			<?php $pays = rows("SELECT * FROM payments WHERE user_id = ? AND kind != 'charge' ORDER BY id DESC LIMIT 15", [$id]); if ($pays): ?>
 				<p style="margin-bottom:2px"><b>Операции</b> <span class="muted">(без ежедневных списаний)</span></p>
 				<?php foreach ($pays as $p): ?><div class="muted"><?= date('d.m.Y H:i', (int)$p['ts']) ?> · <?= ['topup' => 'пополнение', 'refund' => 'возврат', 'gift' => 'подарок'][$p['kind']] ?? h($p['kind']) ?> <?= $p['amount'] ? money((int)$p['amount']) : '' ?> <?= h($p['comment']) ?></div><?php endforeach; ?>
@@ -327,7 +327,7 @@ panel_header('Пользователи');
 					<label class="field">Регистрация</label>
 					<select name="registration"><option value="open" <?= $svc['registration'] === 'open' ? 'selected' : '' ?>>Открыта для всех</option><option value="closed" <?= $svc['registration'] !== 'open' ? 'selected' : '' ?>>Закрыта</option></select>
 					<label class="field">Пробный период, дней</label><input type="text" name="trial_days" value="<?= (int)$svc['trial_days'] ?>">
-					<label class="field">Роутеров в кабинете по умолчанию</label><input type="text" name="router_limit" value="<?= (int)$svc['router_limit'] ?>">
+					<label class="field">Роутеров в пробный период <span class="muted">(после оплаты — без ограничений)</span></label><input type="text" name="router_limit" value="<?= (int)$svc['router_limit'] ?>">
 					<label class="field">Уведомления после окончания подписки ещё, дней</label><input type="text" name="grace_days" value="<?= (int)$svc['grace_days'] ?>">
 					<label class="field">Цена подписки, ₽ в месяц <span class="muted">(списывается с баланса по дням; 0 — бесплатно для всех)</span></label><input type="text" name="price" value="<?= (int)$svc['price'] ?>" inputmode="numeric" style="width:120px">
 					<label class="field">Как оплатить (пока нет онлайн-оплаты)</label><textarea name="pay_text" rows="4" style="font-family:inherit" placeholder="Например: перевод по СБП на номер …, в комментарии укажите номер кабинета. Подписка продлевается в течение суток."><?= h($svc['pay_text']) ?></textarea>

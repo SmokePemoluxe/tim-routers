@@ -571,7 +571,7 @@ function api_register(array $in): array
 	$uid = invite_use((string)($in['invite'] ?? ''));
 	if ($uid !== null && $uid > 0) {
 		$u = get_user($uid);
-		if (!user_can_manage($u) || user_router_count($uid) >= user_router_limit($u)) {
+		if (!user_can_manage($u) || user_limit_reached($u, user_router_count($uid))) {
 			event(null, 'Отклонена регистрация роутера: в кабинете ' . ($u ? $u['email'] : '#' . $uid) . ' нет места или подписка не активна');
 			http_response_code(403);
 			return ['error' => 'invite_required'];

@@ -152,9 +152,36 @@ function billing_tick(): void
 }
 
 
+// Пробный период: ещё ни разу не платил, не «бесплатно для своих», сервис платный
+function user_in_trial(array $u): bool
+{
+	return empty($u['free']) && empty($u['paid_ever']) && price_rub() > 0;
+}
+
+// Лимит роутеров: 0 — без ограничений. Ограничение — только в пробный период;
+// администратор может задать лимит конкретному кабинету вручную.
 function user_router_limit(array $u): int
 {
-	return (int)($u['router_limit'] ?: svc()['router_limit']);
+	if ((int)$u['router_limit'] > 0) {
+		return (int)$u['router_limit'];
+	}
+	return user_in_trial($u) ? max(1, (int)svc()['router_limit']) : 0;
+}
+
+function user_limit_reached(array $u, int $count): bool
+{
+	$l = user_router_limit($u);
+	return $l > 0 && $count >= $l;
+}
+
+// «2 из 3 (пробный период)» или «2 (без ограничений)»
+function user_limit_text(array $u, int $count): string
+{
+	$l = user_router_limit($u);
+	if ($l <= 0) {
+		return $count . ' (без ограничений)';
+	}
+	return $count . ' из ' . $l . ((int)$u['router_limit'] > 0 ? '' : ' (в пробный период; после оплаты — без ограничений)');
 }
 
 function user_router_count(int $uid): int

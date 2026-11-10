@@ -495,7 +495,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !isset($_POST['action'])) {
 			queue_task($rid, 'apply_config', $payload);
 			event($rid, 'Настройки отправлены с сайта');
 			audit('отправлены настройки podkop на роутер «' . $router['name'] . '»: ' . task_label('apply_config', $payload));
-			$_SESSION['flash'] = ['ok', 'Отправлено. Роутер заберёт настройки при следующем выходе на связь (до 2 минут), применит, проверит ключи и переподключит устройства. Результат появится здесь и в Telegram.'];
+			$_SESSION['flash'] = ['ok', 'Отправлено. Роутер заберёт настройки при следующем выходе на связь (до 2 минут), применит, проверит ключи и переподключит устройства. Результат появится здесь и во ВКонтакте, если подключены уведомления.'];
 			header('Location: router.php?id=' . $rid);
 			exit;
 		}
@@ -705,7 +705,7 @@ panel_header($router['name']);
 	<?php endif; ?>
 	<?php foreach (router_warnings($info) as $w): ?><div class="notice">⚠️ <?= h($w) ?></div><?php endforeach; ?>
 	<?php if (!$agentOk): ?>
-		<div class="notice err">Агент на роутере — версии <?= h($info['agent'] ?? '?') ?>, а для настройки с сайта нужна <?= MIN_AGENT ?> или новее. Обновите скрипты (в боте: роутер → «⬆️ Обновить скрипты»).</div>
+		<div class="notice err">Агент на роутере — версии <?= h($info['agent'] ?? '?') ?>, а для настройки с сайта нужна <?= MIN_AGENT ?> или новее. Обновите скрипты: «🛠 Управление» → «⬆️ Обновить скрипты».</div>
 	<?php endif; ?>
 	<?php if ($pending): ?>
 		<div class="notice">⏳ Настройки отправлены <?= ago($pending[0]['created_at']) ?> и ждут роутер (<?= $pending[0]['status'] === 'sent' ? 'роутер применяет' : 'в очереди' ?>). Форма ниже показывает текущее состояние роутера.</div>

@@ -171,7 +171,7 @@ function settings_service_cards(): void
 	<div class="card" id="plan">
 		<h2>💳 Подписка и баланс</h2>
 		<p>Состояние: <b style="color:<?= $plan['active'] ? '#22a06b' : '#c9372c' ?>"><?= h($plan['label']) ?></b><br>
-			<span class="muted">Роутеров: <?= user_router_count($uid) ?> из <?= user_router_limit($u) ?></span></p>
+			<span class="muted">Роутеров: <?= h(user_limit_text($u, user_router_count($uid))) ?></span></p>
 		<?php if (!$plan['free']): ?>
 			<p>Цена: <b><?= h(price_text()) ?></b> — списывается с баланса по дням (<?= money(daily_kop()) ?> в сутки), пока на нём есть деньги.<br>
 				Баланс: <b><?= money((int)$u['balance']) ?></b><?= (int)$u['balance'] >= daily_kop() && daily_kop() > 0 ? ' — хватит примерно до <b>' . date('d.m.Y', paid_until_projected($u)) . '</b>' : '' ?></p>
@@ -215,7 +215,7 @@ function settings_service_cards(): void
 				<ol>
 					<li>Откройте сообщество: <a class="btn" href="<?= h(vk_chat_url($g)) ?>" target="_blank" rel="noopener">💬 Написать сообществу</a></li>
 					<li>Отправьте ему <b>одним сообщением</b> этот код (действует до <?= date('H:i', (int)$l['code_exp']) ?>):
-						<pre class="cmd" style="font-size:20px;letter-spacing:2px;text-align:center"><?= h($l['code']) ?></pre></li>
+						<pre class="cmd" data-copy style="font-size:20px;letter-spacing:2px;text-align:center"><?= h($l['code']) ?></pre></li>
 					<li>Вернитесь сюда и нажмите:</li>
 				</ol>
 				<form method="post"><?= csrf_field() ?><button name="action" value="vk_check" class="primary">✅ Я отправил код</button></form>
