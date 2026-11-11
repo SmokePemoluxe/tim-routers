@@ -157,7 +157,7 @@ function panel_header(string $title, bool $autoRefresh = false): void
 <header>
 	<span><b>🛰 <?= is_service() ? h(svc()['name']) : 'Роутеры' ?></b><?php if (panel_authed()): ?> &nbsp; <a href="index.php">Обзор</a>
 		<?php if (is_service()): ?> &nbsp; <a href="support.php">💬 Поддержка</a><?php else: $open = open_tickets_count(); ?> &nbsp; <a href="users.php">👥 Пользователи<?= $open ? ' <span class="badge" id="open-badge">' . $open . '</span>' : '<span class="badge" id="open-badge" style="display:none"></span>' ?></a><?php endif; ?>
-		 &nbsp; <a href="settings.php">⚙️ Настройки</a><?php endif; ?></span>
+		 &nbsp; <a href="changelog.php">🆕 Что нового</a> &nbsp; <a href="settings.php">⚙️ Настройки</a><?php endif; ?></span>
 	<?php if (panel_authed()): ?><span><?php if (is_service()): ?><span class="muted" style="color:#9fb0c4"><?= h(cur_user()['email'] ?? '') ?></span> &nbsp; <?php endif; ?><a href="index.php?logout=<?= h($_SESSION['csrf'] ?? '') ?>">выйти</a></span><?php endif; ?>
 </header>
 <main>

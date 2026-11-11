@@ -21,6 +21,7 @@ require __DIR__ . '/db.php';
 require __DIR__ . '/tenant.php';
 require __DIR__ . '/tg.php';
 require __DIR__ . '/logic.php';
+require __DIR__ . '/changelog.php';
 require __DIR__ . '/links.php';
 require __DIR__ . '/vk.php';
 require __DIR__ . '/security.php';

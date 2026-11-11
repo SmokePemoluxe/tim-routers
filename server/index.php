@@ -310,7 +310,7 @@ function block_routers(array $routers): string
 			<h2>Роутеры <span class="muted">🟢 всё работает: <?= $cnt['🟢'] ?> · 🔴 на связи, но есть проблема: <?= $cnt['🔴'] ?> · ⚫ не на связи: <?= $cnt['⚫'] ?></span></h2>
 			<?php $nOld = count(array_filter($routers, fn($x) => router_outdated(rinfo($x)))); if ($nOld): ?>
 				<form method="post" class="notice row" style="justify-content:space-between" onsubmit="return confirm('Обновить скрипты (агент и сторож) на всех роутерах?')">
-					<?= csrf_field() ?><input type="hidden" name="ref" value="main"><span>⚠️ На роутерах (<?= $nOld ?>) устарели скрипты или podkop.</span>
+					<?= csrf_field() ?><input type="hidden" name="ref" value="main"><span>⚠️ На роутерах (<?= $nOld ?>) устарели скрипты или podkop. <a href="changelog.php">Что нового?</a></span>
 					<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
 				</form>
 			<?php endif; ?>
@@ -342,7 +342,7 @@ function block_routers(array $routers): string
 					</div>
 					<div class="muted"><?= router_hw_line(rinfo($r)) ?></div>
 					<?php $devs = array_unique(array_filter(array_map(fn($s) => (string)(sdata($s)['sub']['device'] ?? ''), $sections))); if ($devs): ?><div class="muted">📱 В подписке: <b><?= h(implode(', ', $devs)) ?></b></div><?php endif; ?>
-					<?php if ($old = router_outdated(rinfo($r))): ?><div class="warnline">⚠️ Устарело: <?= h(implode(', ', $old)) ?> — откройте роутер и нажмите «⬆️ Обновить»</div><?php endif; ?>
+					<?php if ($old = router_outdated(rinfo($r))): ?><div class="warnline">⚠️ Устарело: <?= h(implode(', ', $old)) ?> — откройте роутер и нажмите «⬆️ Обновить» · что нового — в «🆕 Что нового»</div><?php endif; ?>
 					<?php foreach (router_warnings(rinfo($r)) as $w): ?><div class="warnline">⚠️ <?= h($w) ?></div><?php endforeach; ?>
 					<div style="margin-top:4px">
 						<?php foreach ($sections as $s): ?><div><?= tg_html(section_line($s, $byName)) ?></div><?php endforeach; ?>

@@ -744,6 +744,7 @@ panel_header($router['name']);
 	<?php if ($old = router_outdated($info)): ?>
 		<div class="notice" style="border-left:4px solid #f5a623">
 			<b>⚠️ Устарело: <?= h(implode(', ', $old)) ?>.</b> Новые версии исправляют ошибки и нужны для новых возможностей.
+			<details style="margin-top:6px"><summary>🆕 Что нового в обновлении</summary><?= changelog_html(changelog_latest()) ?></details>
 			<?php if ($canEdit): ?>
 				<div class="row" style="margin-top:6px">
 					<form method="post"><?= csrf_field() ?><input type="hidden" name="ref" value="main"><button name="action" value="update" class="primary">⬆️ Обновить скрипты</button></form>
