@@ -77,6 +77,21 @@ function settings_service_action(string $act): ?array
 			audit('ВКонтакте отвязан от кабинета');
 			return ['ok', 'ВКонтакте отвязан, уведомления туда больше не приходят.'];
 
+		case 'slots':
+			// Сколько роутеров в подписке: от включённых в цену; меньше, чем уже подключено, — нельзя
+			if (!empty($u['free']) || price_rub() <= 0) {
+				return ['ok', 'У вас нет ограничения на число роутеров.'];
+			}
+			$n = (int)($_POST['slots'] ?? 0);
+			$min = max(base_routers(), user_router_count($uid));
+			if ($n < $min || $n > 100) {
+				return ['err', "Укажите число от $min до 100" . ($min > base_routers() ? " — сейчас подключено роутеров: $min; чтобы уменьшить лимит, сначала удалите лишние" : '') . '.'];
+			}
+			q('UPDATE users SET router_limit = ? WHERE id = ?', [$n > base_routers() ? $n : 0, $uid]);
+			$u = get_user($uid);
+			audit('роутеров в подписке: ' . $n . ' (' . price_text($u) . ')');
+			return ['ok', "Роутеров в подписке: $n. Цена — " . price_text($u) . ', ' . money(daily_kop($u)) . ' в сутки' . (user_in_trial($u) ? ' (после пробного периода; сейчас действует лимит пробного периода — ' . user_router_limit($u) . ')' : ', со следующего ежедневного списания') . '.'];
+
 		case 'support_on':
 			$days = max(1, min(14, (int)($_POST['days'] ?? 3)));
 			q('UPDATE users SET support_until = ? WHERE id = ?', [time() + $days * 86400, $uid]);
@@ -173,8 +188,17 @@ function settings_service_cards(): void
 		<p>Состояние: <b style="color:<?= $plan['active'] ? '#22a06b' : '#c9372c' ?>"><?= h($plan['label']) ?></b><br>
 			<span class="muted">Роутеров: <?= h(user_limit_text($u, user_router_count($uid))) ?></span></p>
 		<?php if (!$plan['free']): ?>
-			<p>Цена: <b><?= h(price_text()) ?></b> — списывается с баланса по дням (<?= money(daily_kop()) ?> в сутки), пока на нём есть деньги.<br>
-				Баланс: <b><?= money((int)$u['balance']) ?></b><?= (int)$u['balance'] >= daily_kop() && daily_kop() > 0 ? ' — хватит примерно до <b>' . date('d.m.Y', paid_until_projected($u)) . '</b>' : '' ?></p>
+			<p>Цена: <b><?= h(price_text($u)) ?></b> — списывается с баланса по дням (<?= money(daily_kop($u)) ?> в сутки), пока на нём есть деньги.<br>
+				Баланс: <b><?= money((int)$u['balance']) ?></b><?= (int)$u['balance'] >= daily_kop($u) && daily_kop($u) > 0 ? ' — хватит примерно до <b>' . date('d.m.Y', paid_until_projected($u)) . '</b>' : '' ?></p>
+			<?php $slotMin = max(base_routers(), user_router_count($uid)); ?>
+			<form method="post" class="row" id="slots"><?= csrf_field() ?>
+				<span>Роутеров в подписке:</span>
+				<input type="number" name="slots" value="<?= user_slots($u) ?>" min="<?= $slotMin ?>" max="100" style="width:80px"
+					oninput="var n = Math.max(<?= base_routers() ?>, +this.value || 0), k = <?= price_rub() * 100 ?> + (n - <?= base_routers() ?>) * <?= router_price_kop() ?>; document.getElementById('slots-price').textContent = (k / 100).toFixed(2).replace('.', ',').replace(',00', '') + ' ₽ в месяц, ' + (Math.round(k / 30) / 100).toFixed(2).replace('.', ',') + ' ₽ в сутки'">
+				<button name="action" value="slots">Изменить</button>
+				<span class="muted">будет: <b id="slots-price"><?= money(user_month_kop($u)) ?> в месяц, <?= money(daily_kop($u)) ?> в сутки</b></span>
+			</form>
+			<p class="muted"><?= base_routers() ?> роутеров входят в цену <?= price_rub() ?> ₽, каждый следующий — +<?= money(router_price_kop()) ?> в месяц.<?= user_in_trial($u) ? ' В пробный период можно подключить до ' . (int)$svc['router_limit'] . ' роутеров.' : '' ?></p>
 			<?php if ($svc['pay_text'] !== ''): ?>
 				<div class="notice"><b>Как пополнить баланс:</b><br><?= nl2br(h($svc['pay_text'])) ?><br><span class="muted">Номер вашего кабинета для оплаты: <b>#<?= $uid ?></b></span></div>
 			<?php else: ?>

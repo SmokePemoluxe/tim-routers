@@ -60,7 +60,8 @@ function svc(): array
 	return (kv_get('svc', []) ?: []) + [
 		'registration' => 'open',   // open — свободная, closed — закрыта
 		'trial_days' => 14,
-		'router_limit' => 3,
+		'router_limit' => 2,        // роутеров в пробный период
+		'base_routers' => 5,        // роутеров, входящих в цену подписки; каждый следующий — цена / base_routers
 		'grace_days' => 7,          // после окончания оплаты уведомления ещё идут столько дней
 		'price' => 0,               // рублей в месяц (списывается с баланса по дням); 0 — бесплатно для всех
 		'pay_text' => '',           // как оплатить (пока нет платёжного шлюза)
@@ -85,7 +86,7 @@ function user_plan(array $u): array
 	}
 	// С учётом баланса: деньги списываются по дням, пока их хватает
 	$until = paid_until_projected($u);
-	if ($until > $now && ((int)$u['paid_until'] > $now || (int)$u['balance'] >= daily_kop())) {
+	if ($until > $now && ((int)$u['paid_until'] > $now || (int)$u['balance'] >= daily_kop($u))) {
 		$trial = empty($u['paid_ever']);
 		return ['active' => true, 'notify' => true, 'free' => false, 'until' => $until,
 			'label' => ($trial ? 'пробный период до ' : 'работает до ') . date('d.m.Y', $until)];
@@ -105,14 +106,46 @@ function price_rub(): int
 	return max(0, (int)svc()['price']);
 }
 
-function price_text(): string
+// Сколько роутеров входит в цену подписки
+function base_routers(): int
 {
-	return price_rub() > 0 ? price_rub() . ' ₽ в месяц' : 'бесплатно';
+	return max(1, (int)svc()['base_routers']);
 }
 
-function daily_kop(): int
+// Цена одного роутера сверх включённых, копеек в месяц (цена / base_routers)
+function router_price_kop(): int
 {
-	return (int)round(price_rub() * 100 / 30);
+	return (int)round(price_rub() * 100 / base_routers());
+}
+
+// Оплачиваемый лимит роутеров кабинета: не меньше включённых в цену (users.router_limit — сколько выбрано)
+function user_slots(array $u): int
+{
+	return max(base_routers(), (int)$u['router_limit']);
+}
+
+// Цена в месяц для кабинета, копеек: базовая цена + каждый роутер сверх включённых
+function user_month_kop(?array $u = null): int
+{
+	$extra = $u ? user_slots($u) - base_routers() : 0;
+	return price_rub() * 100 + $extra * router_price_kop();
+}
+
+function price_text(?array $u = null): string
+{
+	if (price_rub() <= 0) {
+		return 'бесплатно';
+	}
+	if ($u && user_slots($u) > base_routers()) {
+		return money(user_month_kop($u)) . ' в месяц за ' . user_slots($u) . ' роутеров';
+	}
+	return price_rub() . ' ₽ в месяц за ' . base_routers() . ' роутеров';
+}
+
+// Списание за сутки: цена в месяц / 30
+function daily_kop(?array $u = null): int
+{
+	return (int)round(user_month_kop($u) / 30);
 }
 
 function money(int $kop): string
@@ -125,7 +158,7 @@ function money(int $kop): string
 function paid_until_projected(array $u): int
 {
 	$base = max(time(), (int)$u['paid_until']);
-	$d = daily_kop();
+	$d = daily_kop($u);
 	return $d > 0 ? $base + intdiv((int)$u['balance'], $d) * 86400 : $base;
 }
 
@@ -139,11 +172,14 @@ function balance_op(int $uid, int $kop, string $kind, string $comment = ''): voi
 // Из cron: продлить на сутки тех, у кого срок кончается, а на балансе есть деньги
 function billing_tick(): void
 {
-	$d = daily_kop();
-	if ($d <= 0) {
+	if (price_rub() <= 0) {
 		return;
 	}
-	foreach (rows("SELECT * FROM users WHERE status = 'active' AND free = 0 AND paid_until < ? AND balance >= ?", [time() + 600, $d]) as $u) {
+	foreach (rows("SELECT * FROM users WHERE status = 'active' AND free = 0 AND paid_until < ? AND balance > 0", [time() + 600]) as $u) {
+		$d = daily_kop($u); // у каждого своя цена: зависит от выбранного числа роутеров
+		if ($d <= 0 || (int)$u['balance'] < $d) {
+			continue;
+		}
 		q('UPDATE users SET balance = balance - ?, paid_until = ?, paid_ever = 1 WHERE id = ? AND balance >= ?', [$d, max(time(), (int)$u['paid_until']) + 86400, $u['id'], $d]);
 		q('INSERT INTO payments (user_id, ts, amount, kind, comment) VALUES (?, ?, ?, ?, ?)', [$u['id'], time(), -$d, 'charge', 'сутки работы сервиса']);
 		$left = (int)$u['balance'] - $d;
@@ -160,14 +196,24 @@ function user_in_trial(array $u): bool
 	return empty($u['free']) && empty($u['paid_ever']) && price_rub() > 0;
 }
 
-// Лимит роутеров: 0 — без ограничений. Ограничение — только в пробный период;
-// администратор может задать лимит конкретному кабинету вручную.
+// Лимит роутеров: 0 — без ограничений («бесплатно для своих» или сервис бесплатный).
+// Пробный период — svc router_limit; после оплаты — выбранное число роутеров (не меньше включённых в цену).
 function user_router_limit(array $u): int
 {
-	if ((int)$u['router_limit'] > 0) {
-		return (int)$u['router_limit'];
+	if (!empty($u['free']) || price_rub() <= 0) {
+		return 0;
 	}
-	return user_in_trial($u) ? max(1, (int)svc()['router_limit']) : 0;
+	return user_in_trial($u) ? max(1, (int)svc()['router_limit']) : user_slots($u);
+}
+
+// Почему нельзя добавить ещё роутер — для сообщений и плашки
+function user_limit_msg(array $u): string
+{
+	$l = user_router_limit($u);
+	if (user_in_trial($u)) {
+		return "В пробный период можно подключить до $l роутеров. После оплаты подписки — до " . user_slots($u) . ', а при необходимости — больше: лимит увеличивается в «Настройках».';
+	}
+	return "Подключено максимальное число роутеров по вашей подписке ($l). Чтобы подключить больше, увеличьте лимит в «Настройках» — каждый роутер сверх " . base_routers() . ' стоит ' . money(router_price_kop()) . ' в месяц.';
 }
 
 function user_limit_reached(array $u, int $count): bool
@@ -183,7 +229,7 @@ function user_limit_text(array $u, int $count): string
 	if ($l <= 0) {
 		return $count . ' (без ограничений)';
 	}
-	return $count . ' из ' . $l . ((int)$u['router_limit'] > 0 ? '' : ' (в пробный период; после оплаты — без ограничений)');
+	return $count . ' из ' . $l . (user_in_trial($u) ? ' (пробный период; после оплаты — до ' . user_slots($u) . ')' : '');
 }
 
 function user_router_count(int $uid): int

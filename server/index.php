@@ -190,7 +190,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 		if ($name === '') {
 			$notice = 'Укажите имя роутера.';
 		} elseif (is_service() && user_limit_reached($me, (int)val("SELECT COUNT(*) FROM routers WHERE user_id = ? AND status = 'active'", [cur_uid()]))) {
-			$notice = 'В пробный период можно подключить до ' . user_router_limit($me) . ' роутеров. После оплаты подписки ограничения нет.';
+			$notice = user_limit_msg($me);
 		} else {
 			q("UPDATE routers SET name = ?, status = 'active' WHERE id = ?", [$name, $rid]);
 			event($rid, 'Принят в систему как «' . $name . '»');
@@ -218,7 +218,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
 			exit;
 		}
 		if (is_service() && user_limit_reached($me, user_router_count(cur_uid()))) {
-			$_SESSION['flash'] = 'В пробный период можно подключить до ' . user_router_limit($me) . ' роутеров. После оплаты подписки ограничения нет.';
+			$_SESSION['flash'] = user_limit_msg($me);
 			header('Location: index.php');
 			exit;
 		}
@@ -314,8 +314,11 @@ function block_routers(array $routers): string
 					<button name="action" value="update_all">⬆️ Обновить скрипты на всех</button>
 				</form>
 			<?php endif; ?>
+			<?php if (is_service() && ($me = cur_user()) && user_limit_reached($me, user_router_count(cur_uid()))): ?>
+				<div class="limitline">ℹ️ Роутеров: <?= h(user_limit_text($me, user_router_count(cur_uid()))) ?> — это предел. <?= h(user_limit_msg($me)) ?> <?php if (!user_in_trial($me)): ?><a href="settings.php#slots">Увеличить лимит</a><?php endif; ?></div>
+			<?php endif; ?>
 			<?php if (!$routers): ?>
-				<p class="muted">Пока пусто. Как подключить роутер — внизу страницы.</p>
+				<p class="muted">Пока пусто. Как подключить роутер — в разделе «➕ Как подключить роутер» ниже.</p>
 			<?php endif; ?>
 			<?php foreach ($routers as $r):
 				$sections = router_sections((int)$r['id']);
@@ -387,13 +390,10 @@ function block_alerts(): string
 	return capture(function () {
 		$alerts = rows('SELECT * FROM outbox WHERE user_id = ? ORDER BY id DESC LIMIT 15', [cur_uid()]);
 		?>
-		<div class="card">
-			<h2>🔔 Уведомления</h2>
-			<?php if (!$alerts): ?><p class="muted">Пока тихо.</p><?php endif; ?>
-			<?php foreach ($alerts as $m): ?>
-				<div class="msg"><span class="muted"><?= fmt_time($m['ts']) ?></span><br><?= tg_html($m['text']) ?></div>
-			<?php endforeach; ?>
-		</div>
+		<?php if (!$alerts): ?><p class="muted">Пока тихо.</p><?php endif; ?>
+		<?php foreach ($alerts as $m): ?>
+			<div class="msg"><span class="muted"><?= fmt_time($m['ts']) ?></span><br><?= tg_html($m['text']) ?></div>
+		<?php endforeach; ?>
 		<?php
 	});
 }
@@ -403,8 +403,6 @@ function block_tasks(): string
 	return capture(function () {
 		$tasks = rows('SELECT t.*, r.name AS rname FROM tasks t JOIN routers r ON r.id = t.router_id WHERE r.user_id = ? ORDER BY t.id DESC LIMIT 15', [cur_uid()]);
 		?>
-		<div class="card">
-			<h2>Задачи для роутеров</h2>
 			<?php if (!$tasks): ?><p class="muted">Задач ещё не было.</p><?php endif; ?>
 			<?php foreach ($tasks as $t):
 				$st = ['queued' => '⏳ в очереди', 'sent' => '📨 у роутера', 'done' => '✅ готово', 'failed' => '❌ ошибка'][$t['status']] ?? $t['status']; ?>
@@ -414,7 +412,6 @@ function block_tasks(): string
 					<?php if ($t['result']): ?><div class="muted"><?= h($t['result']) ?></div><?php endif; ?>
 				</div>
 			<?php endforeach; ?>
-		</div>
 		<?php
 	});
 }
@@ -469,8 +466,6 @@ panel_header('Обзор');
 	<div id="b-pending"><?= $blocks['pending'] ?></div>
 	<div id="b-routers"><?= $blocks['routers'] ?></div>
 	<div id="b-updates"><?= $blocks['updates'] ?></div>
-	<div id="b-alerts"><?= $blocks['alerts'] ?></div>
-	<div id="b-tasks"><?= $blocks['tasks'] ?></div>
 
 	<?php $inv = $_SESSION['invite'] ?? null; $invFresh = $inv && time() - $inv['ts'] < INVITE_TTL; ?>
 	<details class="card" id="install" <?= $invFresh && time() - $inv['ts'] < 600 ? 'open' : '' ?>>
@@ -490,6 +485,16 @@ panel_header('Обзор');
 			Если podkop ставить не нужно — добавьте в конец <code>--no-podkop</code>.</p>
 		<p><b>Обновить podkop</b> на уже подключённом роутере — та же команда с <code>--update-podkop</code> в конце
 			(настройки podkop и регистрация роутера сохраняются). Если podkop устарел, в списке роутеров рядом с его версией написано «есть vX».</p>
+	</details>
+
+	<details class="card">
+		<summary><h2 style="display:inline">🔔 Уведомления</h2></summary>
+		<div id="b-alerts"><?= $blocks['alerts'] ?></div>
+	</details>
+
+	<details class="card">
+		<summary><h2 style="display:inline">📋 Задачи для роутеров</h2></summary>
+		<div id="b-tasks"><?= $blocks['tasks'] ?></div>
 	</details>
 
 	<details class="card">

@@ -741,7 +741,9 @@ function router_events(array $r, array $events): void
 		} elseif (($ev['type'] ?? '') === 'login') {
 			$ip = (string)($ev['ip'] ?? '');
 			$via = ['luci' => 'LuCI', 'ssh' => 'SSH', 'terminal' => 'терминал'][$ev['via'] ?? ''] ?? (string)($ev['via'] ?? '?');
-			$line = '• ' . $via . ' ' . h((string)($ev['user'] ?? '')) . ($ip !== '' ? ' с ' . h($ip) : '');
+			// Имя устройства в локальной сети (из DHCP роутера) — чтобы было понятно, чей это телефон или компьютер
+			$host = preg_replace('/[^A-Za-z0-9._-]/', '', mb_substr((string)($ev['host'] ?? ''), 0, 63));
+			$line = '• ' . $via . ' ' . h((string)($ev['user'] ?? '')) . ($ip !== '' ? ' с ' . h($ip) : '') . ($host !== '' ? ' (' . h($host) . ')' : '');
 			if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
 				$g = ip_geo($ip);
 				$line .= $g['text'] !== '' ? ' (' . h($g['text']) . ($g['proxy'] ? ', VPN/хостинг' : '') . ')' : '';

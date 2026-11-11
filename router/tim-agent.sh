@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.8"
+VERSION="2.9"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -397,7 +397,8 @@ login_check() {
 		cp "$now" "$seen"
 		return
 	fi
-	touch "$seen"
+	# Пустой список образцов в BusyBox grep -f не совпадает ни с чем — тогда новые входы терялись бы
+	[ -s "$seen" ] || echo '#' > "$seen"
 	grep -vxFf "$seen" "$now" | tail -n 20 | while IFS= read -r line; do
 		via=""; ok=false; key=false; user=""; ip=""
 		case "$line" in
@@ -412,7 +413,10 @@ login_check() {
 		[ -n "$via" ] || continue
 		[ -n "$user" ] || user=$(printf '%s' "$line" | sed -nE "s/.* for '?([A-Za-z0-9_.-]+)'? .*/\1/p")
 		ip=$(printf '%s' "$line" | sed -nE 's/.* from ([0-9a-fA-F.:]+[0-9a-fA-F]).*/\1/p' | sed -E 's/:[0-9]+$//')
-		add_event "$(printf '{"type":"login","via":"%s","ok":%s,"key":%s,"user":%s,"ip":%s}' "$via" "$ok" "$key" "$(json_str "$user")" "$(json_str "$ip")")"
+		# Имя устройства по DHCP этого роутера (телефон, компьютер) — если адрес выдавал он
+		host=""
+		[ -n "$ip" ] && host=$(awk -v ip="$ip" '$3 == ip && $4 != "*" { print $4; exit }' /tmp/dhcp.leases 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-63)
+		add_event "$(printf '{"type":"login","via":"%s","ok":%s,"key":%s,"user":%s,"ip":%s,"host":%s}' "$via" "$ok" "$key" "$(json_str "$user")" "$(json_str "$ip")" "$(json_str "$host")")"
 	done
 	cp "$now" "$seen"
 }

@@ -112,6 +112,7 @@ function panel_header(string $title, bool $autoRefresh = false): void
 	input[type=email] { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c1c7d0; border-radius: 4px; font: inherit; min-height: 34px; }
 	footer { max-width: 1100px; margin: 0 auto; padding: 10px 16px 24px; color: #626f86; font-size: 12px; }
 	footer a { color: #626f86; }
+	.limitline { background: #f4f5f7; color: #44546f; border-left: 3px solid #b3b9c4; padding: 6px 10px; margin: 6px 0 10px; font-size: 13px; border-radius: 3px; }
 	.warnline { background: #fff4d6; border-left: 3px solid #f5a623; padding: 3px 8px; margin: 4px 0; font-size: 13px; border-radius: 3px; }
 	.badge { background: #c9372c; color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; font-weight: 700; }
 	.legal h3 { font-size: 15px; margin: 18px 0 6px; }
