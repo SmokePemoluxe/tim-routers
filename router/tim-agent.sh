@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.10"
+VERSION="2.11"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -641,9 +641,9 @@ sub_apply_list() { # секция
 			fi
 		fi
 	fi
-	# «Держаться за текущий сервер»: автовыбор не меняет живой сервер на более быстрый (допуск 30 с),
-	# а уходит с него, только когда тот перестал отвечать — на лучший из разрешённых
-	if [ -f "$sa_f.sticky" ]; then sa_tol=30000; else sa_tol=""; fi
+	# «Держаться за текущий сервер»: автовыбор не меняет живой сервер на более быстрый (допуск 1 с —
+	# максимум, который принимает LuCI podkop: 50–1000 мс), а уходит с него, когда тот перестал отвечать
+	if [ -f "$sa_f.sticky" ]; then sa_tol=1000; else sa_tol=""; fi
 	if [ "$(uci -q get "podkop.$1.urltest_tolerance")" != "$sa_tol" ]; then
 		if [ -n "$sa_tol" ]; then
 			uci set "podkop.$1.urltest_tolerance=$sa_tol"
@@ -2151,6 +2151,24 @@ run() {
 	# После загрузки роутера даём подняться сети и podkop
 	up=$(cut -d. -f1 /proc/uptime)
 	[ "$up" -lt 180 ] && sleep $((180 - up))
+
+	# С 2.11 допуск «держаться за текущий сервер» — 1000 (LuCI не принимает больше): правим старые 30000 сразу
+	mig=""
+	for f in "$SUB_DIR"/*.sticky; do
+		[ -e "$f" ] || continue
+		s=${f##*/}
+		s=${s%.sticky}
+		if [ "$(uci -q get "podkop.$s.urltest_tolerance")" = 30000 ]; then
+			uci set "podkop.$s.urltest_tolerance=1000"
+			mig=1
+		fi
+	done
+	if [ -n "$mig" ]; then
+		uci commit podkop
+		/etc/init.d/podkop reload >/dev/null 2>&1
+		watch_check silent # своё изменение — не сообщать как «изменено не через панель»
+		log "допуск автовыбора для «держаться за сервер»: 30000 → 1000 мс"
+	fi
 
 	while true; do
 		TASKS_DONE=0
