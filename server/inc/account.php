@@ -190,6 +190,10 @@ function settings_service_cards(): void
 		<?php if (!$plan['free']): ?>
 			<p>Цена: <b><?= h(price_text($u)) ?></b> — списывается с баланса по дням (<?= money(daily_kop($u)) ?> в сутки), пока на нём есть деньги.<br>
 				Баланс: <b><?= money((int)$u['balance']) ?></b><?= (int)$u['balance'] >= daily_kop($u) && daily_kop($u) > 0 ? ' — хватит примерно до <b>' . date('d.m.Y', paid_until_projected($u)) . '</b>' : '' ?></p>
+			<?php if (!empty($plan['free_until'])): ?>
+				<div class="notice">🎁 Сейчас идёт <b><?= h($plan['free_kind']) ?></b> — до <b><?= date('d.m.Y H:i', $plan['free_until']) ?></b>. Баланс в это время не списывается; списания (<?= money(daily_kop($u)) ?> в сутки) начнутся <b><?= date('d.m.Y', $plan['free_until']) ?></b>.
+					<?= (int)$u['balance'] >= daily_kop($u) ? 'С текущим балансом сервис проработает примерно до <b>' . date('d.m.Y', $plan['until']) . '</b>.' : 'Чтобы сервис продолжил работать после этого, пополните баланс.' ?></div>
+			<?php endif; ?>
 			<?php $slotMin = max(base_routers(), user_router_count($uid)); ?>
 			<form method="post" class="row" id="slots"><?= csrf_field() ?>
 				<span>Роутеров в подписке:</span>

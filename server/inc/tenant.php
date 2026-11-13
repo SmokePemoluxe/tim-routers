@@ -87,9 +87,12 @@ function user_plan(array $u): array
 	// С учётом баланса: деньги списываются по дням, пока их хватает
 	$until = paid_until_projected($u);
 	if ($until > $now && ((int)$u['paid_until'] > $now || (int)$u['balance'] >= daily_kop($u))) {
-		$trial = empty($u['paid_ever']);
-		return ['active' => true, 'notify' => true, 'free' => false, 'until' => $until,
-			'label' => ($trial ? 'пробный период до ' : 'работает до ') . date('d.m.Y', $until)];
+		// Бесплатные дни (пробный период или подаренные) идут без списаний с баланса
+		$fu = user_free_until($u);
+		$kind = $fu ? user_free_kind($u) : '';
+		$label = $fu ? $kind . ' до ' . date('d.m.Y', $fu) . ((int)$u['balance'] >= daily_kop($u) ? ', с балансом — до ' . date('d.m.Y', $until) : '')
+			: 'работает до ' . date('d.m.Y', $until);
+		return ['active' => true, 'notify' => true, 'free' => false, 'until' => $until, 'free_until' => $fu, 'free_kind' => $kind, 'label' => $label];
 	}
 	$until = (int)$u['paid_until'];
 	$grace = $until + (int)svc()['grace_days'] * 86400;
@@ -154,6 +157,22 @@ function money(int $kop): string
 	return (fmod($r, 1.0) == 0.0 ? number_format($r, 0, ',', ' ') : number_format($r, 2, ',', ' ')) . ' ₽';
 }
 
+// До какого момента идут бесплатные дни (пробный период, подаренные) — 0, если их нет.
+// Списание продлевает срок на сутки, поэтому срок дальше суток вперёд — это дни без списаний.
+function user_free_until(array $u): int
+{
+	$pu = (int)$u['paid_until'];
+	return $pu > time() + 86400 + 900 ? $pu : 0;
+}
+
+// «пробный период» — пока не было ни списаний, ни подарков и срок не дальше пробного; иначе «бесплатные дни»
+function user_free_kind(array $u): string
+{
+	$trialEnd = (int)$u['created_at'] + (int)svc()['trial_days'] * 86400 + 3600;
+	$other = val("SELECT 1 FROM payments WHERE user_id = ? AND kind IN ('charge', 'gift') LIMIT 1", [(int)$u['id']]);
+	return !$other && (int)$u['paid_until'] <= $trialEnd ? 'пробный период' : 'бесплатные дни';
+}
+
 // До какого дня хватит оплаченного срока и баланса
 function paid_until_projected(array $u): int
 {
@@ -182,10 +201,42 @@ function billing_tick(): void
 		}
 		q('UPDATE users SET balance = balance - ?, paid_until = ?, paid_ever = 1 WHERE id = ? AND balance >= ?', [$d, max(time(), (int)$u['paid_until']) + 86400, $u['id'], $d]);
 		q('INSERT INTO payments (user_id, ts, amount, kind, comment) VALUES (?, ?, ?, ?, ?)', [$u['id'], time(), -$d, 'charge', 'сутки работы сервиса']);
-		$left = (int)$u['balance'] - $d;
-		if ($left < $d * 3 && $left + $d >= $d * 3) {
-			notify_user((int)$u['id'], '💳 На балансе осталось ' . money($left) . ' — это примерно на ' . intdiv($left, $d) . ' дн. Пополните баланс в «Настройках» кабинета, чтобы сервис не отключился.');
+	}
+	plan_warnings();
+}
+
+// Предупреждения за 3 дня и за 1 день до окончания подписки (пробного периода, подаренных дней
+// или денег на балансе). Каждое — один раз на дату окончания; после пополнения дата сдвигается — счёт заново.
+function plan_warnings(): void
+{
+	$now = time();
+	foreach (rows("SELECT * FROM users WHERE status = 'active' AND free = 0") as $u) {
+		$p = user_plan($u);
+		if (!$p['active'] || $p['free'] || $p['until'] <= $now) {
+			continue;
 		}
+		$left = $p['until'] - $now;
+		$step = $left <= 86400 ? 1 : ($left <= 3 * 86400 ? 3 : 0);
+		if (!$step) {
+			continue;
+		}
+		$key = okey('plan_warn', (int)$u['id']);
+		$w = kv_get($key, []);
+		$day = date('Y-m-d', $p['until']);
+		if (($w['day'] ?? '') === $day && in_array($step, (array)($w['sent'] ?? []), true)) {
+			continue;
+		}
+		$sent = ($w['day'] ?? '') === $day ? (array)$w['sent'] : [];
+		$sent[] = $step;
+		if ($step === 1) {
+			$sent[] = 3; // за день до конца — предупреждение «за 3 дня» уже не нужно
+		}
+		kv_set($key, ['day' => $day, 'sent' => array_values(array_unique($sent))]);
+		$what = !empty($p['free_until']) && (int)$u['balance'] < daily_kop($u)
+			? (($p['free_kind'] ?? '') === 'пробный период' ? 'Пробный период закончится' : 'Бесплатные дни закончатся')
+			: 'Средства на балансе закончатся';
+		$when = $step === 1 ? 'меньше чем через сутки' : 'через ' . max(1, (int)round($left / 86400)) . ' дн.';
+		notify_user((int)$u['id'], '⏳ ' . $what . ' ' . $when . ' — ' . date('d.m.Y H:i', $p['until']) . '. Чтобы сервис продолжил работать, пополните баланс в «Настройках» кабинета: ' . price_text($u) . ' (' . money(daily_kop($u)) . ' в сутки). Без подписки роутеры продолжат работать с текущими настройками podkop, но выключатся сторож интернета, автоматика подписок и изменения с сайта.');
 	}
 }
 

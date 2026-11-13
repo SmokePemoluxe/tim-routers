@@ -458,8 +458,10 @@ panel_header('Обзор');
 		<?php endif; ?>
 		<?php if (!$plan['active']): ?>
 			<div class="notice err">⏳ Подписка <?= h($plan['label']) ?>. Роутеры продолжают работать как настроены, но менять настройки и добавлять новые нельзя<?= $plan['notify'] ? ', уведомления скоро прекратятся' : ', уведомления не приходят' ?>. <a href="settings.php#plan">Как продлить</a></div>
-		<?php elseif (!$plan['free'] && $plan['until'] - time() < 3 * 86400): ?>
-			<div class="notice">⏳ Подписка: <?= h($plan['label']) ?>. <a href="settings.php#plan">Как продлить</a></div>
+		<?php elseif (!$plan['free'] && $plan['until'] - time() < 3 * 86400): $dl = $plan['until'] - time(); ?>
+			<div class="notice">⏳ Подписка закончится <?= $dl < 86400 ? 'меньше чем через сутки' : 'через ' . max(1, (int)round($dl / 86400)) . ' дн.' ?> — <?= date('d.m.Y H:i', $plan['until']) ?> (<?= h($plan['label']) ?>). <a href="settings.php#plan">Пополнить баланс</a></div>
+		<?php elseif (!empty($plan['free_until'])): ?>
+			<div class="limitline">🎁 Идёт <?= h($plan['free_kind']) ?> до <b><?= date('d.m.Y', $plan['free_until']) ?></b> (ещё <?= (int)ceil(($plan['free_until'] - time()) / 86400) ?> дн.) — баланс пока не списывается, списания начнутся <?= date('d.m.Y', $plan['free_until']) ?>.<?= (int)$me['balance'] >= daily_kop($me) ? ' С балансом хватит до ' . date('d.m.Y', $plan['until']) . '.' : '' ?> <a href="settings.php#plan">Подробнее</a></div>
 		<?php endif; ?>
 	<?php endif; ?>
 
