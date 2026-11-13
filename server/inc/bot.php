@@ -155,7 +155,7 @@ function screen_router(int $rid): array
 		}
 	}
 	if (is_muted($r)) {
-		$text .= "\n🔕 Уведомления выключены до " . date('d.m H:i', (int)$r['mute_until']);
+		$text .= "\n🔕 Уведомления выключены до " . dt((int)$r['mute_until'], 'd.m H:i');
 	}
 
 	$rows = [];

@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.9"
+VERSION="2.10"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -272,7 +272,7 @@ info_json() {
 	board=$(ubus call system board 2>/dev/null)
 	sb=false
 	pidof sing-box >/dev/null && sb=true
-	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s,"dl_proxy":%s,"dl_proxy_section":%s,"update_interval":%s},"watchdog":' \
+	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"tz":%s,"zone":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s,"dl_proxy":%s,"dl_proxy_section":%s,"update_interval":%s},"watchdog":' \
 		"$(json_str "$VERSION")" \
 		"$(json_str "$(jsonfilter -s "$board" -e '@.model' 2>/dev/null)")" \
 		"$(json_str "$DISTRIB_RELEASE")" \
@@ -283,6 +283,8 @@ info_json() {
 		"$(json_num "$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{if (t) print int(a*100/t)}' /proc/meminfo)")" \
 		"$(json_num "$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)")" \
 		"$(json_num "$(df -k /overlay 2>/dev/null | awk 'NR==2 {print $4}')")" \
+		"$(json_str "$(date +%z)")" \
+		"$(json_str "$(uci -q get system.@system[0].zonename)")" \
 		"$(json_str "$(uci -q get network.lan.ipaddr | cut -d/ -f1)")" \
 		"$(json_str "$(cat /sys/class/net/br-lan/address 2>/dev/null)")" \
 		"$(json_str "$(wan_mac)")" \
@@ -347,9 +349,9 @@ watch_dump() {
 	esac
 }
 
-add_event() { # JSON-строка события
+add_event() { # JSON-строка события; дописываем время события по часам роутера (unix-время)
 	mkdir -p "$CONF_DIR"
-	echo "$1" >> "$EVENTS"
+	echo "${1%\}},\"ts\":$(date +%s)}" >> "$EVENTS"
 }
 
 # $1: report — сообщить об изменениях; silent — только запомнить (после своих же задач)

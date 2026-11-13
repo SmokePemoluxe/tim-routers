@@ -229,7 +229,7 @@ panel_header('Настройки');
 		</p>
 		<p class="muted">Приходят те же уведомления, что в ленте на главной: роутер пропал со связи и вернулся, не работает ключ или VPN, результаты задач. Повторы ограничены, как и раньше.</p>
 		<?php if ($lastErr): ?>
-			<div class="notice err">Последняя ошибка отправки (<?= date('d.m H:i', (int)$lastErr['ts']) ?>): <?= h($lastErr['error']) ?></div>
+			<div class="notice err">Последняя ошибка отправки (<?= dt((int)$lastErr['ts'], 'd.m H:i') ?>): <?= h($lastErr['error']) ?></div>
 		<?php endif; ?>
 
 		<details <?= $vk['token'] ? '' : 'open' ?>>
@@ -324,7 +324,7 @@ panel_header('Настройки');
 		<?php foreach ($devs as $k => $d): ?>
 			<div class="item">
 				<b><?= h($d['ua']) ?></b><?= $k === $myKey ? ' <span class="muted">— это устройство</span>' : '' ?><br>
-				<span class="muted">последний вход <?= date('d.m.Y H:i', (int)$d['last']) ?> с IP <?= h($d['ip']) ?> · впервые <?= date('d.m.Y', (int)$d['first']) ?>
+				<span class="muted">последний вход <?= dt((int)$d['last'], 'd.m.Y H:i') ?> с IP <?= h($d['ip']) ?> · впервые <?= date('d.m.Y', (int)$d['first']) ?>
 					<?= (int)$d['trusted_until'] > time() ? ' · код не спрашивается до ' . date('d.m', (int)$d['trusted_until']) : '' ?></span>
 			</div>
 		<?php endforeach; ?>

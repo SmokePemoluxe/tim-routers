@@ -195,7 +195,7 @@ panel_header('Пользователи');
 		<?= $u['status'] === 'blocked' ? ' · <b style="color:#c9372c">ЗАБЛОКИРОВАН</b>' : '' ?>
 	</p>
 	<div class="notice <?= $granted ? 'ok' : '' ?>">
-		🛟 Доступ поддержки: <?= $granted ? '<b>открыт до ' . date('d.m H:i', (int)$u['support_until']) . '</b> — видны и меняются настройки роутеров, журнал; каждое действие видно пользователю' : '<b>закрыт</b>. Данные роутеров и журнал пользователя не показываются. Попросите открыть доступ — кнопкой в обращении или в «Настройках» кабинета.' ?>
+		🛟 Доступ поддержки: <?= $granted ? '<b>открыт до ' . dt((int)$u['support_until'], 'd.m H:i') . '</b> — видны и меняются настройки роутеров, журнал; каждое действие видно пользователю' : '<b>закрыт</b>. Данные роутеров и журнал пользователя не показываются. Попросите открыть доступ — кнопкой в обращении или в «Настройках» кабинета.' ?>
 	</div>
 
 	<?php if ($tid && ($t = row('SELECT * FROM tickets WHERE id = ? AND user_id = ?', [$tid, $id]))): ?>
@@ -233,7 +233,7 @@ panel_header('Пользователи');
 				<button name="action" value="limit">Роутеров по подписке</button> <span class="muted">от <?= base_routers() ?> (входят в цену), каждый следующий +<?= money(router_price_kop()) ?> в месяц; в пробный период — <?= (int)svc()['router_limit'] ?>, «бесплатно для своих» — без ограничений</span></form>
 			<?php $pays = rows("SELECT * FROM payments WHERE user_id = ? AND kind != 'charge' ORDER BY id DESC LIMIT 15", [$id]); if ($pays): ?>
 				<p style="margin-bottom:2px"><b>Операции</b> <span class="muted">(без ежедневных списаний)</span></p>
-				<?php foreach ($pays as $p): ?><div class="muted"><?= date('d.m.Y H:i', (int)$p['ts']) ?> · <?= ['topup' => 'пополнение', 'refund' => 'возврат', 'gift' => 'подарок'][$p['kind']] ?? h($p['kind']) ?> <?= $p['amount'] ? money((int)$p['amount']) : '' ?> <?= h($p['comment']) ?></div><?php endforeach; ?>
+				<?php foreach ($pays as $p): ?><div class="muted"><?= dt((int)$p['ts'], 'd.m.Y H:i') ?> · <?= ['topup' => 'пополнение', 'refund' => 'возврат', 'gift' => 'подарок'][$p['kind']] ?? h($p['kind']) ?> <?= $p['amount'] ? money((int)$p['amount']) : '' ?> <?= h($p['comment']) ?></div><?php endforeach; ?>
 			<?php endif; ?>
 		</div>
 		<div class="card">
@@ -277,7 +277,7 @@ panel_header('Пользователи');
 		<?php $ts = rows('SELECT * FROM tickets WHERE user_id = ? ORDER BY updated_at DESC LIMIT 30', [$id]); ?>
 		<?php if (!$ts): ?><p class="muted">Обращений не было.</p><?php endif; ?>
 		<?php foreach ($ts as $t): ?>
-			<a class="item router-link" href="users.php?id=<?= $id ?>&amp;t=<?= (int)$t['id'] ?>"><b><?= h($t['subject']) ?></b> <span class="muted">· <?= $statusRu[$t['status']] ?? '' ?> · <?= date('d.m.Y H:i', (int)$t['updated_at']) ?></span></a>
+			<a class="item router-link" href="users.php?id=<?= $id ?>&amp;t=<?= (int)$t['id'] ?>"><b><?= h($t['subject']) ?></b> <span class="muted">· <?= $statusRu[$t['status']] ?? '' ?> · <?= dt((int)$t['updated_at'], 'd.m.Y H:i') ?></span></a>
 		<?php endforeach; ?>
 	</div>
 
@@ -285,7 +285,7 @@ panel_header('Пользователи');
 	<details class="card">
 		<summary><h2 style="display:inline">📜 Журнал пользователя</h2> <span class="muted">последние 100 событий — виден, пока открыт доступ</span></summary>
 		<?php foreach (rows('SELECT e.*, r.name AS rname FROM events e LEFT JOIN routers r ON r.id = e.router_id WHERE e.user_id = ? ORDER BY e.id DESC LIMIT 100', [$id]) as $e): ?>
-			<div class="item"><span class="muted"><?= date('d.m H:i', (int)$e['ts']) ?> · <?= h($e['rname'] ?? '') ?></span><br><?= h($e['text']) ?></div>
+			<div class="item"><span class="muted"><?= dt((int)$e['ts'], 'd.m H:i') ?> · <?= h($e['rname'] ?? '') ?></span><br><?= h($e['text']) ?></div>
 		<?php endforeach; ?>
 	</details>
 	<?php endif; ?>

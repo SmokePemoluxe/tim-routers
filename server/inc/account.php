@@ -167,7 +167,7 @@ function settings_service_cards(): void
 	<div class="card">
 		<h2>👤 Аккаунт</h2>
 		<p>Почта: <b><?= h($u['email']) ?></b> <?= $u['verified_at'] ? '<span style="color:#22a06b">✓ подтверждена</span>' : '<span style="color:#c9372c">не подтверждена</span>' ?><br>
-			<span class="muted">Кабинет создан <?= date('d.m.Y', (int)$u['created_at']) ?><?= $u['last_login'] ? ' · последний вход ' . date('d.m.Y H:i', (int)$u['last_login']) : '' ?></span></p>
+			<span class="muted">Кабинет создан <?= date('d.m.Y', (int)$u['created_at']) ?><?= $u['last_login'] ? ' · последний вход ' . dt((int)$u['last_login'], 'd.m.Y H:i') : '' ?></span></p>
 		<?php if (!$u['verified_at']): ?>
 			<form method="post" action="verify.php"><?= csrf_field() ?><button name="resend" value="1">📧 Отправить письмо для подтверждения ещё раз</button></form>
 		<?php endif; ?>
@@ -191,7 +191,7 @@ function settings_service_cards(): void
 			<p>Цена: <b><?= h(price_text($u)) ?></b> — списывается с баланса по дням (<?= money(daily_kop($u)) ?> в сутки), пока на нём есть деньги.<br>
 				Баланс: <b><?= money((int)$u['balance']) ?></b><?= (int)$u['balance'] >= daily_kop($u) && daily_kop($u) > 0 ? ' — хватит примерно до <b>' . date('d.m.Y', paid_until_projected($u)) . '</b>' : '' ?></p>
 			<?php if (!empty($plan['free_until'])): ?>
-				<div class="notice">🎁 Сейчас идёт <b><?= h($plan['free_kind']) ?></b> — до <b><?= date('d.m.Y H:i', $plan['free_until']) ?></b>. Баланс в это время не списывается; списания (<?= money(daily_kop($u)) ?> в сутки) начнутся <b><?= date('d.m.Y', $plan['free_until']) ?></b>.
+				<div class="notice">🎁 Сейчас идёт <b><?= h($plan['free_kind']) ?></b> — до <b><?= dt((int)$plan['free_until'], 'd.m.Y H:i') ?></b>. Баланс в это время не списывается; списания (<?= money(daily_kop($u)) ?> в сутки) начнутся <b><?= date('d.m.Y', $plan['free_until']) ?></b>.
 					<?= (int)$u['balance'] >= daily_kop($u) ? 'С текущим балансом сервис проработает примерно до <b>' . date('d.m.Y', $plan['until']) . '</b>.' : 'Чтобы сервис продолжил работать после этого, пополните баланс.' ?></div>
 			<?php endif; ?>
 			<?php $slotMin = max(base_routers(), user_router_count($uid)); ?>
@@ -231,7 +231,7 @@ function settings_service_cards(): void
 		<?php elseif ($l['id']): ?>
 			<p>Приходят в личные сообщения: <b><?= h($l['name']) ?></b> — <?= $l['enabled'] ? '<b style="color:#22a06b">включены</b>' : '<b style="color:#c9372c">выключены</b>' ?>.
 				<br><span class="muted">Пишет сообщество «<?= h($g['name']) ?>». О чём: роутер пропал со связи и вернулся, не работает ключ или VPN, вход на роутер, результаты задач.</span></p>
-			<?php if ($vkErr): ?><div class="notice err">Последняя ошибка отправки (<?= date('d.m H:i', (int)$vkErr['ts']) ?>): <?= h($vkErr['error']) ?></div><?php endif; ?>
+			<?php if ($vkErr): ?><div class="notice err">Последняя ошибка отправки (<?= dt((int)$vkErr['ts'], 'd.m H:i') ?>): <?= h($vkErr['error']) ?></div><?php endif; ?>
 			<div class="row">
 				<form method="post"><?= csrf_field() ?><button name="action" value="vk_test">✉️ Отправить тестовое</button></form>
 				<form method="post"><?= csrf_field() ?><button name="action" value="vk_toggle"><?= $l['enabled'] ? '🔕 Выключить' : '🔔 Включить' ?></button></form>
@@ -242,7 +242,7 @@ function settings_service_cards(): void
 			<?php if ($l['code'] !== '' && (int)$l['code_exp'] > time()): ?>
 				<ol>
 					<li>Откройте сообщество: <a class="btn" href="<?= h(vk_chat_url($g)) ?>" target="_blank" rel="noopener">💬 Написать сообществу</a></li>
-					<li>Отправьте ему <b>одним сообщением</b> этот код (действует до <?= date('H:i', (int)$l['code_exp']) ?>):
+					<li>Отправьте ему <b>одним сообщением</b> этот код (действует до <?= dt((int)$l['code_exp'], 'H:i') ?>):
 						<pre class="cmd" data-copy style="font-size:20px;letter-spacing:2px;text-align:center"><?= h($l['code']) ?></pre></li>
 					<li>Вернитесь сюда и нажмите:</li>
 				</ol>
@@ -257,7 +257,7 @@ function settings_service_cards(): void
 	<div class="card">
 		<h2>🛟 Доступ поддержки</h2>
 		<?php if ((int)$u['support_until'] > time()): ?>
-			<p>Открыт до <b><?= date('d.m.Y H:i', (int)$u['support_until']) ?></b>: поддержка может менять настройки ваших роутеров и запрашивать отчёты. Каждое её действие записывается в журнал событий.</p>
+			<p>Открыт до <b><?= dt((int)$u['support_until'], 'd.m.Y H:i') ?></b>: поддержка может менять настройки ваших роутеров и запрашивать отчёты. Каждое её действие записывается в журнал событий.</p>
 			<form method="post"><?= csrf_field() ?><button name="action" value="support_off" class="danger">Закрыть доступ сейчас</button></form>
 		<?php else: ?>
 			<p>Закрыт. Поддержка видит только, на связи ли ваши роутеры и работают ли они (зелёный / красный / серый значок) — ни настроек podkop, ни названий, ни адресов.

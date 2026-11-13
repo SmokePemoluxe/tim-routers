@@ -736,7 +736,7 @@ panel_header($router['name']);
 	<p class="muted" style="margin-top:0"><?= router_hw_line($info) ?> · на связи <?= ago($router['last_seen']) ?> · данные — на момент последней связи</p>
 
 	<?php if ($readonlyWhy): ?><div class="notice">🔒 <?= h($readonlyWhy) ?></div><?php endif; ?>
-	<?php if ($acc === 'support'): ?><div class="notice">🛟 Роутер пользователя <b><?= h($owner['email'] ?? '') ?></b>: доступ поддержки открыт до <?= date('d.m H:i', (int)$owner['support_until']) ?>. Все ваши действия видны пользователю в его журнале.</div><?php endif; ?>
+	<?php if ($acc === 'support'): ?><div class="notice">🛟 Роутер пользователя <b><?= h($owner['email'] ?? '') ?></b>: доступ поддержки открыт до <?= dt((int)$owner['support_until'], 'd.m H:i') ?>. Все ваши действия видны пользователю в его журнале.</div><?php endif; ?>
 	<?php if ($flash): ?><div class="notice <?= h($flash[0]) ?>"><?= h($flash[1]) ?></div><?php endif; ?>
 	<?php if ($errors): ?>
 		<div class="notice err"><b>Не отправлено — исправьте:</b><ul style="margin:6px 0 0"><?php foreach ($errors as $e): ?><li><?= h($e) ?></li><?php endforeach; ?></ul></div>
@@ -805,13 +805,13 @@ panel_header($router['name']);
 		<p style="margin-bottom:4px"><b>Последние задачи:</b></p>
 		<?php foreach ($rtasks as $t):
 			$st = ['queued' => '⏳', 'sent' => '📨', 'done' => '✅', 'failed' => '❌'][$t['status']] ?? $t['status']; ?>
-			<div class="item"><?= $st ?> <span class="muted"><?= date('d.m H:i', (int)$t['created_at']) ?></span> <?= h(task_label($t['type'], json_decode($t['payload'], true) ?: [])) ?>
+			<div class="item"><?= $st ?> <span class="muted"><?= dt((int)$t['created_at'], 'd.m H:i') ?></span> <?= h(task_label($t['type'], json_decode($t['payload'], true) ?: [])) ?>
 				<?php if ($t['result']): ?><div class="muted"><?= h($t['result']) ?></div><?php endif; ?></div>
 		<?php endforeach; ?>
 		<?php if (!$rtasks): ?><p class="muted">Задач ещё не было.</p><?php endif; ?>
 
 		<?php if (!empty($wd['installed'])): ?>
-			<p style="margin-bottom:4px"><b>Сторож интернета</b><?= !empty($wd['reboots_row']) ? ' — перезагрузок подряд: ' . (int)$wd['reboots_row'] : '' ?>:</p>
+			<p style="margin-bottom:4px"><b>Сторож интернета</b><?= !empty($wd['reboots_row']) ? ' — перезагрузок подряд: ' . (int)$wd['reboots_row'] : '' ?> <span class="muted">(время — по часам роутера<?= router_tz_label($info) !== '' ? ', ' . h(router_tz_label($info)) . (!empty($info['zone']) ? ' ' . h((string)$info['zone']) : '') : '' ?>)</span>:</p>
 			<?php foreach (array_reverse($wd['history'] ?? []) as $line): ?>
 				<div class="muted"><?= h($line) ?></div>
 			<?php endforeach; ?>

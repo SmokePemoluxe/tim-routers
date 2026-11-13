@@ -76,7 +76,7 @@ panel_header('Поддержка');
 			<h2><?= h($ticket['subject']) ?> <span class="muted"><?= $statusRu[$ticket['status']] ?? '' ?></span></h2>
 			<div id="ticket-msgs" data-poll="support.php?t=<?= (int)$ticket['id'] ?>&amp;partial=msgs"><?= ticket_msgs_html((int)$ticket['id'], false) ?></div>
 			<?php $su = (int)cur_user()['support_until']; ?>
-			<div class="notice" style="margin-top:10px">🛟 Доступ поддержки к вашим роутерам: <?php if ($su > time()): ?><b>открыт до <?= date('d.m H:i', $su) ?></b> — закрыть можно в «Настройках».<?php else: ?><b>закрыт</b> — поддержка видит только, на связи ли роутеры и работают ли они.
+			<div class="notice" style="margin-top:10px">🛟 Доступ поддержки к вашим роутерам: <?php if ($su > time()): ?><b>открыт до <?= dt((int)$su, 'd.m H:i') ?></b> — закрыть можно в «Настройках».<?php else: ?><b>закрыт</b> — поддержка видит только, на связи ли роутеры и работают ли они.
 				<form method="post" style="display:inline"><?= csrf_field() ?><button name="grant" value="1">Открыть доступ на 3 дня</button></form><?php endif; ?></div>
 			<form method="post" style="margin-top:10px">
 				<?= csrf_field() ?>
@@ -105,7 +105,7 @@ panel_header('Поддержка');
 			<div class="card">
 				<h2>Мои обращения</h2>
 				<?php foreach ($list as $t): ?>
-					<a class="item router-link" href="support.php?t=<?= (int)$t['id'] ?>"><b><?= h($t['subject']) ?></b> <span class="muted">· <?= $statusRu[$t['status']] ?? '' ?> · <?= date('d.m.Y H:i', (int)$t['updated_at']) ?></span></a>
+					<a class="item router-link" href="support.php?t=<?= (int)$t['id'] ?>"><b><?= h($t['subject']) ?></b> <span class="muted">· <?= $statusRu[$t['status']] ?? '' ?> · <?= dt((int)$t['updated_at'], 'd.m.Y H:i') ?></span></a>
 				<?php endforeach; ?>
 			</div>
 		<?php endif; ?>

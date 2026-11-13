@@ -236,7 +236,7 @@ function plan_warnings(): void
 			? (($p['free_kind'] ?? '') === 'пробный период' ? 'Пробный период закончится' : 'Бесплатные дни закончатся')
 			: 'Средства на балансе закончатся';
 		$when = $step === 1 ? 'меньше чем через сутки' : 'через ' . max(1, (int)round($left / 86400)) . ' дн.';
-		notify_user((int)$u['id'], '⏳ ' . $what . ' ' . $when . ' — ' . date('d.m.Y H:i', $p['until']) . '. Чтобы сервис продолжил работать, пополните баланс в «Настройках» кабинета: ' . price_text($u) . ' (' . money(daily_kop($u)) . ' в сутки). Без подписки роутеры продолжат работать с текущими настройками podkop, но выключатся сторож интернета, автоматика подписок и изменения с сайта.');
+		notify_user((int)$u['id'], '⏳ ' . $what . ' ' . $when . ' — ' . dt((int)$p['until'], 'd.m.Y H:i') . '. Чтобы сервис продолжил работать, пополните баланс в «Настройках» кабинета: ' . price_text($u) . ' (' . money(daily_kop($u)) . ' в сутки). Без подписки роутеры продолжат работать с текущими настройками podkop, но выключатся сторож интернета, автоматика подписок и изменения с сайта.');
 	}
 }
 
@@ -521,7 +521,7 @@ function ticket_msgs_html(int $tid, bool $forAdmin): string
 	$out = '';
 	foreach (rows('SELECT * FROM ticket_msgs WHERE ticket_id = ? ORDER BY id', [$tid]) as $m) {
 		$who = $m['from_admin'] ? ($forAdmin ? 'Вы' : 'Поддержка') : ($forAdmin ? 'Пользователь' : 'Вы');
-		$out .= '<div class="msg" style="' . ($m['from_admin'] ? 'border-color:#22a06b' : '') . '"><span class="muted">' . $who . ' · ' . date('d.m.Y H:i', (int)$m['ts']) . '</span><br>' . nl2br(h($m['text'])) . '</div>';
+		$out .= '<div class="msg" style="' . ($m['from_admin'] ? 'border-color:#22a06b' : '') . '"><span class="muted">' . $who . ' · ' . dt((int)$m['ts'], 'd.m.Y H:i') . '</span><br>' . nl2br(h($m['text'])) . '</div>';
 	}
 	return $out;
 }

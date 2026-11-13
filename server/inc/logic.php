@@ -66,6 +66,47 @@ function dur(int $s): string
 	return intdiv($s, 86400) . ' д ' . intdiv($s % 86400, 3600) . ' ч';
 }
 
+// Часовой пояс сайта для подписи ко времени: «МСК» или название пояса
+function tz_abbr(): string
+{
+	$tz = date_default_timezone_get();
+	return $tz === 'Europe/Moscow' ? 'МСК' : $tz;
+}
+
+// Дата и время сайта с подписью пояса: «13.11.2026 10:25 МСК»
+function dt(int $ts, string $fmt = 'd.m.Y H:i'): string
+{
+	return date($fmt, $ts) . ' ' . tz_abbr();
+}
+
+// Смещение часового пояса роутера в секундах (агент присылает `date +%z`, например +0700) или null
+function router_tz_offset(array $info): ?int
+{
+	if (!preg_match('/^([+-])(\d{2})(\d{2})$/', (string)($info['tz'] ?? ''), $m)) {
+		return null;
+	}
+	return ($m[1] === '-' ? -1 : 1) * ((int)$m[2] * 3600 + (int)$m[3] * 60);
+}
+
+// «UTC+7» / «UTC+5:30» — пояс роутера
+function router_tz_label(array $info): string
+{
+	$off = router_tz_offset($info);
+	if ($off === null) {
+		return '';
+	}
+	$h = intdiv(abs($off), 3600);
+	$min = intdiv(abs($off) % 3600, 60);
+	return 'UTC' . ($off < 0 ? '−' : '+') . $h . ($min ? ':' . sprintf('%02d', $min) : '');
+}
+
+// Время по часам роутера: «04:12 UTC+7» (если пояс роутера неизвестен — пустая строка)
+function router_local_time(array $info, int $ts, string $fmt = 'd.m H:i'): string
+{
+	$off = router_tz_offset($info);
+	return $off === null ? '' : gmdate($fmt, $ts + $off) . ' ' . router_tz_label($info);
+}
+
 function ago($ts): string
 {
 	return $ts ? dur(time() - (int)$ts) . ' назад' : 'никогда';
@@ -687,7 +728,7 @@ function api_sync(array $r, array $in): array
 		}
 	}
 
-	router_events($r, (array)($in['events'] ?? []));
+	router_events($r, (array)($in['events'] ?? []), is_array($in['info'] ?? null) ? $in['info'] : rinfo($r));
 
 	// Задачи, которые роутер взял, но не ответил за 15 минут, — повторяем (до 3 раз)
 	foreach (rows("SELECT * FROM tasks WHERE router_id = ? AND status = 'sent' AND sent_at < ? AND attempts >= 3", [$rid, $now - 900]) as $t) {
@@ -713,9 +754,10 @@ function watch_label(string $file): string
 }
 
 // События от агента: настройки изменены НЕ через панель; входы на роутер (LuCI, SSH, терминал)
-function router_events(array $r, array $events): void
+function router_events(array $r, array $events, array $info = []): void
 {
 	$rid = (int)$r['id'];
+	$info = $info ?: rinfo($r);
 	$cfg = [];
 	$logins = [];
 	$subNotes = [];
@@ -723,10 +765,17 @@ function router_events(array $r, array $events): void
 		if (!is_array($ev)) {
 			continue;
 		}
+		// Когда это было по часам роутера (агент 2.10+ присылает время события и пояс роутера)
+		$ets = (int)($ev['ts'] ?? 0);
+		if ($ets < time() - 7 * 86400 || $ets > time() + 3600) {
+			$ets = time();
+		}
+		$rt = router_local_time($info, $ets);
+		$rtNote = $rt !== '' ? ' (на роутере ' . $rt . ')' : '';
 		if (($ev['type'] ?? '') === 'config') {
 			$file = preg_replace('/[^a-z_]/', '', (string)($ev['file'] ?? ''));
-			event($rid, 'Изменено не через панель: ' . watch_label($file));
-			$b = '• <b>' . h(watch_label($file)) . '</b>';
+			event($rid, 'Изменено не через панель: ' . watch_label($file) . $rtNote);
+			$b = '• <b>' . h(watch_label($file)) . '</b>' . h($rtNote);
 			foreach (array_slice((array)($ev['removed'] ?? []), 0, 12) as $l) {
 				$b .= "\n   − " . h(mb_substr((string)$l, 0, 160));
 			}
@@ -736,8 +785,8 @@ function router_events(array $r, array $events): void
 			$cfg[] = $b;
 		} elseif (($ev['type'] ?? '') === 'config_mass') {
 			$files = array_map(fn($x) => watch_label(preg_replace('/[^a-z_]/', '', (string)$x)), array_slice((array)($ev['files'] ?? []), 0, 15));
-			event($rid, 'Изменено сразу много настроек не через панель: ' . implode(', ', $files));
-			$cfg[] = '• изменено сразу много разделов: <b>' . h(implode(', ', $files)) . '</b> — похоже на сброс настроек или переустановку. Подробности — в LuCI роутера.';
+			event($rid, 'Изменено сразу много настроек не через панель: ' . implode(', ', $files) . $rtNote);
+			$cfg[] = '• изменено сразу много разделов: <b>' . h(implode(', ', $files)) . '</b>' . h($rtNote) . ' — похоже на сброс настроек или переустановку. Подробности — в LuCI роутера.';
 		} elseif (($ev['type'] ?? '') === 'login') {
 			$ip = (string)($ev['ip'] ?? '');
 			$via = ['luci' => 'LuCI', 'ssh' => 'SSH', 'terminal' => 'терминал'][$ev['via'] ?? ''] ?? (string)($ev['via'] ?? '?');
@@ -750,14 +799,15 @@ function router_events(array $r, array $events): void
 			}
 			$line .= !empty($ev['key']) ? ' по SSH-ключу' : '';
 			$line .= !empty($ev['ok']) ? ' — вход выполнен' : ' — <b>НЕВЕРНЫЙ пароль</b>';
+			$line .= h($rtNote);
 			event($rid, strip_tags(str_replace('• ', 'Вход на роутер: ', $line)));
 			$logins[] = $line;
 		} elseif (($ev['type'] ?? '') === 'sub_note') {
 			// Подписка сама сменила страну или вернула автовыбор
 			$sec = preg_replace('/[^A-Za-z0-9_]/', '', (string)($ev['section'] ?? ''));
 			$text = mb_substr((string)($ev['text'] ?? ''), 0, 300);
-			event($rid, 'Подписка ' . $sec . ': ' . $text);
-			$subNotes[] = '• <b>' . h($sec) . '</b>: ' . h($text);
+			event($rid, 'Подписка ' . $sec . ': ' . $text . $rtNote);
+			$subNotes[] = '• <b>' . h($sec) . '</b>: ' . h($text . $rtNote);
 		}
 	}
 	$kb = kb([[['📟 Роутер', 'r:' . $rid]]]);
