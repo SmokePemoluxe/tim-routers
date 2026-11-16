@@ -1,0 +1,5 @@
+# Скрипты для роутера — строго с переводами строк Unix, иначе sh на OpenWrt их не выполнит
+*.sh text eol=lf
+*.php text eol=lf
+*.js text eol=lf
+*.cmd text eol=crlf

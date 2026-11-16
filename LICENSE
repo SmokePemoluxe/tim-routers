@@ -1,0 +1,41 @@
+Copyright (c) 2026 SmokePemoluxe. Все права защищены. / All rights reserved.
+
+ПРОПРИЕТАРНАЯ ЛИЦЕНЗИЯ
+
+Этот код (скрипты для роутеров, серверная часть, тексты и оформление) — собственность
+правообладателя. Он опубликован только для того, чтобы роутеры, подключённые к сервису
+правообладателя, могли скачивать скрипты при установке и обновлении.
+
+Без письменного разрешения правообладателя запрещается:
+  - копировать, изменять, распространять или публиковать этот код или его части;
+  - использовать его для создания собственного сервиса или продукта, в том числе бесплатного;
+  - продавать, сдавать в аренду или иным образом передавать права на него.
+
+Разрешается только:
+  - устанавливать скрипты на свои роутеры командой установки из кабинета сервиса правообладателя
+    и пользоваться ими в составе этого сервиса.
+
+Код предоставляется «как есть», без каких-либо гарантий.
+
+Версии, опубликованные до изменения этой лицензии под лицензией Apache 2.0, остаются под ней
+для тех, кто получил их до изменения; все последующие версии распространяются только на условиях,
+изложенных выше.
+
+---
+
+PROPRIETARY LICENSE
+
+This code (router scripts, server part, texts and design) is the property of the copyright holder.
+It is published solely so that routers connected to the copyright holder's service can download
+the scripts during installation and updates.
+
+Without written permission of the copyright holder you may not copy, modify, distribute or publish
+this code or any part of it, use it to build your own service or product (including free ones),
+or sell, rent or otherwise transfer rights to it. You may only install the scripts on your own
+routers using the installation command from the copyright holder's service and use them as part
+of that service.
+
+The code is provided "as is", without warranty of any kind.
+
+Versions published under the Apache License 2.0 before this change remain under that license for
+those who obtained them before the change; all later versions are available only under the terms above.
