@@ -8,6 +8,7 @@
 # Флаги:
 #   --no-podkop      не ставить podkop, даже если его нет
 #   --update-podkop  обновить уже установленный podkop официальным установщиком
+#   --podkop-mirror  ставить/обновлять podkop скриптом с зеркала podkop (с движком podkop-engine)
 #   --ref ВЕРСИЯ     ветка или тег на GitHub (по умолчанию main)
 #   --code КОД       одноразовый код приглашения из панели (нужен для нового роутера)
 
@@ -18,6 +19,8 @@ WITH_PODKOP=1
 UPDATE_PODKOP=0
 CODE=""
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
+PODKOP_MIRROR="https://mirror.podkop.net/urjw/scripts/bootstrap.sh"
+PODKOP_VIA_MIRROR=0
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
@@ -59,6 +62,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--no-podkop) WITH_PODKOP=0 ;;
 		--update-podkop) UPDATE_PODKOP=1 ;;
+		--podkop-mirror) PODKOP_VIA_MIRROR=1 ;;
 		--ref) shift; REF=$1 ;;
 		--code) shift; CODE=$1 ;;
 		http://*|https://*) SERVER=${1%/} ;;
@@ -164,13 +168,39 @@ echo "OK"
 
 # --- 2. podkop ---
 say "2/4 podkop"
-run_podkop_installer() {
-	if ! fetch_url "$PODKOP_INSTALLER" /tmp/podkop-install.sh; then
-		net_diag
-		die "не удалось скачать установщик podkop с GitHub (podkop ставится только оттуда) — пришлите в поддержку текст выше"
+# Если GitHub недоступен (или пакеты с него не скачались) — скрипт с зеркала разработчиков podkop.
+# Он же ставит движок podkop-engine (новые REALITY-серверы и xhttp). Зеркало собирает телеметрию установки
+# (модель роутера, список пакетов, память) — так написано в README podkop.
+run_podkop_mirror() {
+	if ! fetch_url "$PODKOP_MIRROR" /tmp/podkop-install.sh || ! head -n 1 /tmp/podkop-install.sh | grep -q '^#!/bin/sh'; then
+		rm -f /tmp/podkop-install.sh
+		return 1
 	fi
+	echo "ставлю podkop скриптом с зеркала разработчиков podkop (mirror.podkop.net)"
 	sh /tmp/podkop-install.sh
+	rc=$?
 	rm -f /tmp/podkop-install.sh
+	return $rc
+}
+
+run_podkop_installer() {
+	if [ "$PODKOP_VIA_MIRROR" = "1" ]; then
+		run_podkop_mirror || echo "скрипт зеркала завершился с ошибкой"
+	elif fetch_url "$PODKOP_INSTALLER" /tmp/podkop-install.sh && head -n 1 /tmp/podkop-install.sh | grep -q '^#!/bin/sh'; then
+		if ! sh /tmp/podkop-install.sh || [ ! -x /etc/init.d/podkop ]; then
+			rm -f /tmp/podkop-install.sh
+			echo "официальный установщик podkop не справился (часто это недоступный GitHub) — пробую зеркало podkop"
+			run_podkop_mirror || echo "скрипт зеркала тоже завершился с ошибкой"
+		fi
+		rm -f /tmp/podkop-install.sh
+	else
+		rm -f /tmp/podkop-install.sh
+		echo "GitHub недоступен — пробую зеркало разработчиков podkop"
+		if ! run_podkop_mirror && [ ! -x /etc/init.d/podkop ]; then
+			net_diag
+			die "не удалось скачать установщик podkop ни с GitHub, ни с зеркала podkop — пришлите в поддержку текст выше"
+		fi
+	fi
 	[ -x /etc/init.d/podkop ] || die "podkop не установился"
 	# Совет разработчика podkop: после установки/обновления очистить кэш LuCI
 	rm -rf /tmp/luci-*
@@ -224,7 +254,8 @@ if [ -x /etc/init.d/podkop ]; then
 	fi
 elif [ "$WITH_PODKOP" = "1" ]; then
 	echo "podkop не найден — ставлю официальным установщиком (он может задать пару вопросов)"
-	preinstall_singbox
+	# Со скриптом зеркала sing-box не ставим заранее: тогда он сам поставит движок podkop-engine
+	[ "$PODKOP_VIA_MIRROR" = "1" ] || preinstall_singbox
 	run_podkop_installer
 	podkop_fresh=1
 else

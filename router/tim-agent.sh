@@ -15,10 +15,13 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.12"
+VERSION="2.13"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
+# Зеркало разработчиков podkop (если GitHub недоступен); ставит podkop и движок podkop-engine.
+# Скрипт зеркала отправляет разработчикам podkop телеметрию установки (модель, пакеты, память).
+PODKOP_MIRROR="https://mirror.podkop.net/urjw/scripts/bootstrap.sh"
 
 BIN="/usr/bin/$NAME"
 INIT="/etc/init.d/$NAME"
@@ -275,7 +278,7 @@ info_json() {
 	board=$(ubus call system board 2>/dev/null)
 	sb=false
 	pidof sing-box >/dev/null && sb=true
-	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"tz":%s,"zone":%s,"wan":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s,"dl_proxy":%s,"dl_proxy_section":%s,"update_interval":%s},"watchdog":' \
+	printf '{"agent":%s,"model":%s,"openwrt":%s,"podkop":%s,"singbox":%s,"hostname":%s,"uptime":%s,"mem_free":%s,"mem_total":%s,"flash_free":%s,"tz":%s,"zone":%s,"wan":%s,"lan_ip":%s,"mac_lan":%s,"mac_wan":%s,"vpn_ifaces":%s,"singbox_running":%s,"podkop_settings":{"dns_type":%s,"dns_server":%s,"bootstrap_dns_server":%s,"dl_proxy":%s,"dl_proxy_section":%s,"update_interval":%s},' \
 		"$(json_str "$VERSION")" \
 		"$(json_str "$(jsonfilter -s "$board" -e '@.model' 2>/dev/null)")" \
 		"$(json_str "$DISTRIB_RELEASE")" \
@@ -297,9 +300,16 @@ info_json() {
 		"$(json_str "$(uci -q get podkop.settings.dns_type)")" \
 		"$(json_str "$(uci -q get podkop.settings.dns_server)")" \
 		"$(json_str "$(uci -q get podkop.settings.bootstrap_dns_server)")" \
-		"$([ "$(uci -q get podkop.settings.download_lists_via_proxy)" = 1 ] && echo true || echo false)" \
+		"$({ [ "$(uci -q get podkop.settings.download_lists_via_proxy)" = 1 ] || [ -f "$CONF_DIR/dl_auto_off" ]; } && echo true || echo false)" \
 		"$(json_str "$(uci -q get podkop.settings.download_lists_via_proxy_section)")" \
 		"$(json_str "$(uci -q get podkop.settings.update_interval)")"
+	# Движок: podkop-engine понимает xhttp и новые REALITY-серверы (xray-core 26.9+); обычный sing-box — нет
+	printf '"engine":%s,"reality_fail":%s,"sb_fatal":%s,"dl_auto_off":%s,"podkop_safe":%s,"watchdog":' \
+		"$(sb_engine && echo true || echo false)" \
+		"$(json_num "$(logread 2>/dev/null | grep -c 'reality verification failed')")" \
+		"$(json_str "$(sb_fatal)")" \
+		"$([ -f "$CONF_DIR/dl_auto_off" ] && echo true || echo false)" \
+		"$([ -f /tmp/inet-watchdog.podkop_safe ] && echo true || echo false)"
 	watchdog_json
 	printf '}'
 }
@@ -549,18 +559,113 @@ words_match() { # название слова
 	return 1
 }
 
-# Оставить ключи, которые понимает podkop/sing-box, и выкинуть серверы со словами из исключений
+# Параметр из ссылки (до #), как его читает podkop
+link_param() { # ссылка имя
+	lp_q=${1%%#*}
+	case "$lp_q" in
+		*\?*) lp_q="?${lp_q#*\?}" ;;
+		*) return ;;
+	esac
+	printf '%s' "$lp_q" | sed -n "s/.*[?&]$2=\([^&]*\).*/\1/p" | head -n 1
+}
+
+# Почему podkop не сможет работать с этой ссылкой (пусто — сможет). SB_XHTTP=1 — стоит podkop-engine.
+link_unsupported() { # ссылка
+	case "$1" in
+		vless://*|trojan://*|hysteria2://*|hy2://*|ss://*) ;;
+		vmess://*) echo "VMess podkop не поддерживает"; return ;;
+		*) echo "тип ${1%%://*} podkop не поддерживает"; return ;;
+	esac
+	if printf '%s' "$1" | grep -qE '@(0\.0\.0\.0|127\.0\.0\.1):'; then
+		echo "заглушка провайдера, не сервер"
+		return
+	fi
+	valid_key "$1" || { echo "ссылка с недопустимыми символами"; return; }
+	case "$1" in
+		vless://*|trojan://*)
+			lu_t=$(link_param "$1" type)
+			case "$lu_t" in
+				''|tcp|raw|ws|grpc) ;;
+				xhttp|splithttp) [ "$SB_XHTTP" = 1 ] || { echo "транспорт xhttp — нужен движок podkop-engine"; return; } ;;
+				*) echo "транспорт $lu_t podkop не поддерживает"; return ;;
+			esac
+			case "$(link_param "$1" security)" in
+				''|tls|reality|none) ;;
+				*) echo "шифрование $(link_param "$1" security) podkop не поддерживает"; return ;;
+			esac
+			;;
+		ss://*)
+			[ -n "$(link_param "$1" plugin)" ] && { echo "Shadowsocks с плагином podkop не поддерживает"; return; }
+			;;
+	esac
+}
+
+# Стоит ли движок podkop-engine (понимает xhttp и новые REALITY-серверы)
+sb_engine() {
+	sing-box version 2>/dev/null | grep -q 'tools.decode-link'
+}
+
+# Последняя причина падения sing-box из журнала (без цветовых кодов)
+sb_fatal() {
+	pidof sing-box >/dev/null && return
+	logread 2>/dev/null | grep 'sing-box' | grep -F 'FATAL' | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g; s/.*FATAL[^ ]* *//' | cut -c1-300
+}
+
+# Оставить ключи, которые понимает podkop/sing-box, и выкинуть серверы со словами из исключений.
+# Отброшенные — в файл $SUB_SKIP строками «host:port|тип|название|причина» (для показа на сайте).
 sub_filter() { # $1 — исключения через запятую; stdin → stdout
+	sb_engine && SB_XHTTP=1 || SB_XHTTP=0
+	[ -n "$SUB_SKIP" ] && : > "$SUB_SKIP"
 	while IFS= read -r l; do
-		case "$l" in
-			vless://*|hysteria2://*|hy2://*|trojan://*|ss://*) ;;
-			*) continue ;;
-		esac
-		printf '%s' "$l" | grep -qE '@(0\.0\.0\.0|127\.0\.0\.1):|[?&]type=xhttp|[?&](mode|extra)=' && continue
-		valid_key "$l" || continue
-		words_match "$(urldecode "${l#*#}")" "$1" && continue
+		sf_why=$(link_unsupported "$l")
+		sf_name=""
+		case "$l" in *#*) sf_name=$(urldecode "${l#*#}" | tr -d '|') ;; esac
+		if [ -z "$sf_why" ] && words_match "$sf_name" "$1"; then
+			sf_why="исключён по названию"
+		fi
+		if [ -n "$sf_why" ]; then
+			[ -n "$SUB_SKIP" ] && printf '%s|%s|%s|%s\n' "$(host_of "$l")" "${l%%://*}" "$sf_name" "$sf_why" >> "$SUB_SKIP"
+			continue
+		fi
 		printf '%s\n' "$l"
 	done
+}
+
+# Порядок ключей для podkop: при запуске автовыбор сначала берёт первый сервер (через него же качаются
+# списки), поэтому первым — последний сервер, который точно работал; REALITY без podkop-engine — в конец
+# (новые серверы xray-core обычный sing-box не понимает).
+sub_order() { # секция; stdin → stdout
+	so_good=$(cat "$SUB_DIR/$1.good" 2>/dev/null)
+	[ -f "$SUB_DIR/$1.fb" ] && so_good=""
+	sb_engine && so_eng=1 || so_eng=0
+	awk -v g="$so_good" -v eng="$so_eng" '
+		{
+			k = 1
+			p = (g != "") ? index($0, "@" g) : 0
+			if (p) { c = substr($0, p + length(g) + 1, 1); if (c == "" || c == "/" || c == "?" || c == "#") k = 0 }
+			if (k && eng != 1 && $0 ~ /^vless:\/\// && $0 ~ /[?&]security=reality/) k = 2
+			printf "%d\t%06d\t%s\n", k, NR, $0
+		}' | sort -k1,1n -k2,2n | cut -f3-
+}
+
+# Запомнить сервер, через который секция сейчас работает (не чаще раза в час — флэш бережём)
+sub_note_good() { # секция
+	ng_f="$SUB_DIR/$1.good"
+	if [ -f "$ng_f" ] && [ $(( $(date +%s) - $(date -r "$ng_f" +%s 2>/dev/null || echo 0) )) -lt 3600 ]; then
+		return
+	fi
+	ng_sel=$(jsonfilter -s "$(clash_get "/proxies/$1-out")" -e '@.now' 2>/dev/null)
+	if [ -z "$ng_sel" ] || [ "$ng_sel" = "$1-urltest-out" ]; then
+		ng_sel=$(jsonfilter -s "$(clash_get "/proxies/$1-urltest-out")" -e '@.now' 2>/dev/null)
+	fi
+	[ -n "$ng_sel" ] || return
+	ng_h=$(sub_members "$1" | awk -F'|' -v t="$ng_sel" '$1 == t { print $2; exit }')
+	[ -n "$ng_h" ] || return
+	if [ "$(cat "$ng_f" 2>/dev/null)" = "$ng_h" ]; then
+		touch "$ng_f"
+	else
+		printf '%s' "$ng_h" > "$ng_f"
+	fi
 }
 
 # Название сервера по его адресу
@@ -628,8 +733,17 @@ sub_apply_list() { # секция
 	sa_want="$RUN_DIR/sub_$1.want"
 	[ -s "$sa_f.links" ] || (umask 077; uci -q get "podkop.$1.urltest_proxy_links" | tr ' ' '\n' > "$sa_f.links")
 	if sub_wanted "$1" "$sa_want"; then
+		[ -f "$sa_f.pin" ] || { sub_order "$1" < "$sa_want" > "$sa_want.o" && mv "$sa_want.o" "$sa_want"; }
 		sa_cur=$(uci -q get "podkop.$1.urltest_proxy_links" | tr ' ' '\n')
-		if [ "$(opt "$1" proxy_config_type)" != "urltest" ] || [ "$sa_cur" != "$(cat "$sa_want")" ]; then
+		# Переписываем, когда изменился состав. Только порядок — лишь пока sing-box лежит: тогда важно,
+		# с какого сервера он начнёт (через него качаются списки), а перезапуск всё равно нужен.
+		sa_need=0
+		if [ "$(opt "$1" proxy_config_type)" != "urltest" ] || [ "$(printf '%s\n' "$sa_cur" | sort)" != "$(sort "$sa_want")" ]; then
+			sa_need=1
+		elif ! pidof sing-box >/dev/null && [ "$(printf '%s\n' "$sa_cur" | head -n 1)" != "$(head -n 1 "$sa_want")" ]; then
+			sa_need=1
+		fi
+		if [ "$sa_need" = 1 ]; then
 			uci set "podkop.$1.proxy_config_type=urltest"
 			uci -q delete "podkop.$1.urltest_proxy_links"
 			while IFS= read -r sa_l; do
@@ -673,9 +787,23 @@ sub_refresh() { # секция
 		echo "$SUB_ERR" > "$f.err"
 		return 1
 	fi
+	SUB_SKIP="$RUN_DIR/sub_$s.skip"
 	grep -E '^[a-z0-9]+://' "$RUN_DIR/sub_$s.all" | sub_filter "$(cat "$f.exclude" 2>/dev/null)" > "$RUN_DIR/sub_$s.use"
+	SUB_SKIP=""
 	total=$(grep -cE '^[a-z0-9]+://' "$RUN_DIR/sub_$s.all")
 	usable=$(grep -c . "$RUN_DIR/sub_$s.use")
+	# Какие серверы не взяты и почему — на сайт (без ключей)
+	if [ "$(cat "$f.skipped" 2>/dev/null)" != "$(cat "$RUN_DIR/sub_$s.skip" 2>/dev/null)" ]; then
+		if [ -s "$RUN_DIR/sub_$s.skip" ]; then cp "$RUN_DIR/sub_$s.skip" "$f.skipped"; else rm -f "$f.skipped"; fi
+	fi
+	rm -f "$RUN_DIR/sub_$s.skip"
+	# Что изменилось в подписке — для ответа на кнопку «Обновить» и журнала
+	set -- $( {
+		cut -d'|' -f1 "$f.names" 2>/dev/null | sed 's/^/o /'
+		while IFS= read -r l; do printf 'n %s\n' "$(host_of "$l")"; done < "$RUN_DIR/sub_$s.use"
+	} | awk '$1 == "o" { o[$2] = 1 } $1 == "n" { n[$2] = 1 } END { for (h in n) if (!(h in o)) a++; for (h in o) if (!(h in n)) r++; printf "%d %d", a + 0, r + 0 }')
+	SUB_ADDED=${1:-0}
+	SUB_GONE=${2:-0}
 	if [ "$usable" -eq 0 ]; then
 		SUB_ERR="в подписке нет серверов, которые подходят для podkop (из $total)"
 		echo "$SUB_ERR" > "$f.err"
@@ -806,6 +934,12 @@ sub_tick_one() { # секция
 	if ! pidof sing-box >/dev/null; then
 		# podkop не работает: свежий список мог бы помочь (но не чаще раза в 10 минут)
 		[ "$t_policy" != "off" ] && [ "$t_age" -ge 600 ] && t_fetch=1
+		# Без скачивания: поставить первым последний рабочий сервер (с него sing-box начнёт и скачает списки)
+		if [ "$t_fetch" = 0 ] && [ -s "$t_f.links" ]; then
+			SUB_CHANGED=0
+			sub_apply_list "$t_s"
+			t_reorder=$SUB_CHANGED
+		fi
 	else
 		# Вернуть автовыбор после снятого ручного выбора
 		if [ -f "$RUN_DIR/sub_$t_s.reselect" ]; then
@@ -827,6 +961,7 @@ sub_tick_one() { # секция
 		section_delay "$t_s" 1
 		if [ -n "$DELAY" ]; then
 			rm -f "$RUN_DIR/sub_$t_s.fails"
+			sub_note_good "$t_s"
 		elif [ -n "$t_pick" ]; then
 			# Выбранный вручную сервер умер: «навсегда» — это закрепление, а здесь возвращаем автовыбор
 			rm -f "$t_f.pick"
@@ -858,6 +993,8 @@ sub_tick_one() { # секция
 		fi
 		t_changed=$SUB_CHANGED
 	fi
+	[ "${t_reorder:-0}" = 1 ] && t_changed=1
+	t_reorder=0
 
 	# Свои страны молчат: берём любые другие. Если список только что обновился — сначала даём шанс ему.
 	if [ "${t_tofb:-0}" = 1 ] && [ "$t_changed" = 0 ] && [ -n "$t_only" ] && [ -z "$t_pin" ] && \
@@ -913,6 +1050,70 @@ quick_check() {
 	fi
 }
 
+# ---------- Здоровье sing-box ----------
+# 1) Процесс есть, а API не отвечает минуту — sing-box завис: перезапускаем podkop.
+# 2) sing-box падает при запуске, потому что не может скачать списки через прокси (например, первый сервер
+#    группы не подключается) — временно качаем списки напрямую; через 6 часов стабильной работы возвращаем.
+SB_HANG=0
+SB_DOWN=0
+podkop_note_event() { # текст
+	log "podkop: $1"
+	add_event "$(printf '{"type":"podkop_note","text":%s}' "$(json_str "$1")")"
+}
+DL_AUTO_OFF="$CONF_DIR/dl_auto_off"
+sb_health() {
+	[ -f "$SVC_OFF" ] && return 0
+	[ -x /etc/init.d/podkop ] && /etc/init.d/podkop enabled || return 0
+	if pidof sing-box >/dev/null; then
+		SB_DOWN=0
+		clash_api_addr
+		[ -n "$CLASH_ADDR" ] || return 0
+		if [ -z "$(clash_get /version)" ]; then
+			SB_HANG=$((SB_HANG + 1))
+			if [ "$SB_HANG" -ge 3 ]; then
+				SB_HANG=0
+				podkop_note_event "sing-box завис: работает, но не отвечает больше минуты — перезапускаю podkop"
+				/etc/init.d/podkop restart >/dev/null 2>&1
+			fi
+			return 0
+		fi
+		SB_HANG=0
+		# Вернуть скачивание списков через прокси после 6 часов стабильной работы
+		if [ -f "$DL_AUTO_OFF" ] && [ $(( $(date +%s) - $(date -r "$DL_AUTO_OFF" +%s 2>/dev/null || echo 0) )) -ge 21600 ]; then
+			rm -f "$DL_AUTO_OFF"
+			if dl_proxy_ok_section "$(uci -q get podkop.settings.download_lists_via_proxy_section)"; then
+				uci set podkop.settings.download_lists_via_proxy=1
+				uci commit podkop
+				/etc/init.d/podkop reload >/dev/null 2>&1
+				watch_check silent
+				podkop_note_event "6 часов без сбоев — снова скачиваю списки через прокси"
+			fi
+		fi
+		return 0
+	fi
+	SB_HANG=0
+	SB_DOWN=$((SB_DOWN + 1))
+	[ "$SB_DOWN" -ge 3 ] || return 0
+	[ "$(uci -q get podkop.settings.download_lists_via_proxy)" = 1 ] || return 0
+	sh_f=$(sb_fatal)
+	case "$sh_f" in
+		*rule-set*|*ruleset*) ;;
+		*) return 0 ;;
+	esac
+	uci set podkop.settings.download_lists_via_proxy=0
+	uci commit podkop
+	date +%s > "$DL_AUTO_OFF"
+	watch_check silent
+	podkop_note_event "sing-box не запускается: списки не скачиваются через прокси ($(printf '%s' "$sh_f" | sed 's/.*: //' | cut -c1-80)) — временно качаю их напрямую и перезапускаю podkop"
+	/etc/init.d/podkop restart >/dev/null 2>&1
+	SB_DOWN=0
+}
+
+dl_proxy_ok_section() { # секция
+	is_section "$1" && case "$(opt "$1" connection_type)" in proxy|vpn) return 0 ;; esac
+	return 1
+}
+
 # Ожидание до следующего выхода на связь, с быстрыми проверками подписок
 agent_wait() { # секунд
 	aw_end=$(( $(date +%s) + $1 ))
@@ -921,7 +1122,10 @@ agent_wait() { # секунд
 		[ "$aw_left" -gt 0 ] || break
 		[ "$aw_left" -gt "$QUICK_EVERY" ] && aw_left=$QUICK_EVERY
 		sleep "$aw_left"
-		[ "$STATUS" = "active" ] && [ "$(date +%s)" -lt "$aw_end" ] && quick_check
+		if [ "$STATUS" = "active" ] && [ "$(date +%s)" -lt "$aw_end" ]; then
+			sb_health
+			quick_check
+		fi
 	done
 }
 
@@ -1095,9 +1299,22 @@ strict_off() { # при удалении агента
 }
 
 # Проход по всем подпискам (раз в цикл агента)
+# Сменился движок sing-box (поставили podkop-engine или вернули обычный) — подписки перечитать сразу:
+# от движка зависит, какие серверы подходят (xhttp)
+sub_engine_check() {
+	sec_e=$(sb_engine && echo 1 || echo 0)
+	[ "$(cat "$CONF_DIR/engine" 2>/dev/null)" = "$sec_e" ] && return
+	echo "$sec_e" > "$CONF_DIR/engine"
+	for sec_st in "$SUB_DIR"/*.stat; do
+		[ -f "$sec_st" ] && sed -i 's/ [0-9]*$/ 0/' "$sec_st"
+	done
+	rm -f "$RUN_DIR"/sub_*.ts
+}
+
 subs_tick() {
 	[ -f "$SVC_OFF" ] && return 0
 	[ -d "$SUB_DIR" ] || return 0
+	sub_engine_check
 	t_now=$(date +%s)
 	t_any=0
 	clash_api_addr
@@ -1156,8 +1373,12 @@ sub_json() { # секция
 	done < "$js_f.names"
 	rm -f "$js_pf" "$js_mf"
 	js_pin=$(cat "$js_f.pin" 2>/dev/null)
+	js_skip=""
+	[ -s "$js_f.skipped" ] && while IFS='|' read -r js_host js_type js_name js_why; do
+		js_skip="$js_skip${js_skip:+,}$(printf '{"host":%s,"type":%s,"name":%s,"why":%s}' "$(json_str "$js_host")" "$(json_str "$js_type")" "$(json_str "$js_name")" "$(json_str "$js_why")")"
+	done < "$js_f.skipped"
 	set -- "$1" $js_stat
-	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"only":%s,"fallback":%s,"fb":%s,"pin":%s,"pin_name":%s,"pick":%s,"policy":%s,"sticky":%s,"device":%s,"error":%s,"now":%s,"servers":[%s]}' \
+	printf '{"total":%s,"usable":%s,"updated":%s,"exclude":%s,"only":%s,"fallback":%s,"fb":%s,"pin":%s,"pin_name":%s,"pick":%s,"policy":%s,"sticky":%s,"device":%s,"error":%s,"now":%s,"servers":[%s],"skipped":[%s],"engine":%s}' \
 		"$(json_num "$2")" "$(json_num "$3")" "$(json_num "$4")" \
 		"$(json_str "$(cat "$js_f.exclude" 2>/dev/null)")" \
 		"$(json_str "$(cat "$js_f.only" 2>/dev/null)")" \
@@ -1169,7 +1390,7 @@ sub_json() { # секция
 		"$([ -f "$js_f.sticky" ] && echo true || echo false)" \
 		"$(json_str "Android $(sub_model)")" \
 		"$(json_str "$(cat "$js_f.err" 2>/dev/null)")" \
-		"$(json_str "$js_nowhost")" "$js_servers"
+		"$(json_str "$js_nowhost")" "$js_servers" "$js_skip" "$(sb_engine && echo true || echo false)"
 }
 
 register() {
@@ -1313,6 +1534,8 @@ run_tasks() {
 			update_podkop) t_update_podkop "$id" ;;
 			refresh_subscription) t_refresh_subscription "$id" ;;
 			sub_switch) t_sub_switch "$id" ;;
+			reboot) t_reboot "$id" ;;
+			show_keys) t_show_keys "$id" ;;
 			*) add_result "$id" false "агент $VERSION не знает задачу «$type» — обновите скрипты" ;;
 		esac
 		TASK_IDX=$((TASK_IDX + 1))
@@ -2063,12 +2286,14 @@ $d"
 	if [ "$v" = 1 ]; then
 		v=$(task_field settings.dl_proxy_section)
 		if is_section "$v" && case "$(opt "$v" connection_type)" in proxy|vpn) true ;; *) false ;; esac; then
-			uci set podkop.settings.download_lists_via_proxy=1
+			# Временно выключено агентом после сбоя — включится само через 6 часов работы
+			[ -f "$DL_AUTO_OFF" ] || uci set podkop.settings.download_lists_via_proxy=1
 			uci set "podkop.settings.download_lists_via_proxy_section=$v"
 		else
 			errors="$errors; скачивание списков: секции $v нет или она не через прокси/VPN — настройка не изменена"
 		fi
 	elif [ "$v" = 0 ]; then
+		rm -f "$DL_AUTO_OFF"
 		uci set podkop.settings.download_lists_via_proxy=0
 	fi
 	# Как часто podkop обновляет списки (значения — как в LuCI podkop)
@@ -2118,6 +2343,83 @@ t_delete_section() {
 	add_result "$id" true "секция $s удалена"
 }
 
+# Разбор подписок для отчёта: что отдаёт провайдер (как обычный клиент и как приложение), какие серверы
+# подходят и почему отброшены, что сейчас стоит в podkop. Без ключей: только адреса, типы и названия серверов.
+sub_link_line() { # ссылка → «тип | адрес | транспорт/шифрование | название | итог»
+	sl_n=""
+	case "$1" in *\#*) sl_n=$(urldecode "${1#*#}") ;; esac
+	sl_why=$(link_unsupported "$1")
+	[ -z "$sl_why" ] && words_match "$sl_n" "$2" && sl_why="исключён по названию"
+	printf '  %-9s | %-28s | %-14s | %s | %s\n' "${1%%://*}" "$(host_of "$1")" \
+		"$(link_param "$1" type)/$(link_param "$1" security)" "$sl_n" "${sl_why:-ПОДХОДИТ}"
+}
+
+sub_diag() {
+	sb_engine && SB_XHTTP=1 || SB_XHTTP=0
+	echo "движок: $(sing-box version 2>/dev/null | head -n 1)$([ "$SB_XHTTP" = 1 ] && echo ' (podkop-engine: xhttp и новый REALITY есть)' || echo ' (обычный sing-box: без xhttp и без REALITY xray-core 26.9+)')"
+	for sd_u in "$SUB_DIR"/*.url; do
+		[ -f "$sd_u" ] || continue
+		sd_s=$(basename "$sd_u" .url)
+		sd_f="$SUB_DIR/$sd_s"
+		sd_url=$(cat "$sd_u")
+		sd_ex=$(cat "$sd_f.exclude" 2>/dev/null)
+		echo
+		echo "----- секция $sd_s"
+		echo "адрес подписки: $(printf '%s' "$sd_url" | sed -E 's#^(https?://[^/]+).*#\1/…#') (путь с токеном скрыт)"
+		echo "исключить: ${sd_ex:-—} · только страны: $(cat "$sd_f.only" 2>/dev/null || echo —) · закреплён: $(cat "$sd_f.pin" 2>/dev/null || echo —) · вручную: $(cat "$sd_f.pick" 2>/dev/null || echo —)"
+		echo "обновлять: $(cat "$sd_f.policy" 2>/dev/null || echo 6h) · запасные страны сейчас: $([ -f "$sd_f.fb" ] && echo да || echo нет) · держаться за сервер: $([ -f "$sd_f.sticky" ] && echo да || echo нет) · последний рабочий: $(cat "$sd_f.good" 2>/dev/null || echo —)"
+		sd_st=$(cat "$sd_f.stat" 2>/dev/null)
+		set -- $sd_st
+		echo "последнее обновление: ${3:+$(date -d "@$3" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$3")} · всего ${1:-?}, подходят ${2:-?} · ошибка: $(cat "$sd_f.err" 2>/dev/null || echo нет)"
+		echo "проверка подписки (этим агентом) была: $(date -d "@$(cat "$RUN_DIR/sub_$sd_s.ts" 2>/dev/null || echo 0)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+		for sd_mode in plain app; do
+			sd_raw="$RUN_DIR/diag.raw"
+			sd_hdr="$RUN_DIR/diag.hdr"
+			if [ "$sd_mode" = plain ]; then
+				sd_code=$(curl -sSL -m 30 -D "$sd_hdr" -o "$sd_raw" -w '%{http_code}' "$sd_url" 2>&1)
+			else
+				sd_code=$(curl -sSL -m 30 -D "$sd_hdr" -A "$SUB_UA" -H "x-hwid: $(sub_hwid)" -H "x-device-os: Android" -H "x-ver-os: 14" \
+					-H "x-device-model: $(sub_model)" -o "$sd_raw" -w '%{http_code}' "$sd_url" 2>&1)
+			fi
+			echo
+			echo "  [$([ "$sd_mode" = plain ] && echo 'как обычный клиент' || echo "как приложение: $SUB_UA, Android $(sub_model)")] HTTP $sd_code, $(wc -c < "$sd_raw" 2>/dev/null || echo 0) байт"
+			grep -iE '^(content-type|subscription-userinfo|profile-update-interval|profile-title|announce|support-url):' "$sd_hdr" 2>/dev/null | tr -d '\r' | \
+				while IFS= read -r sd_h; do
+					case "$sd_h" in
+						*': base64:'*) printf '    %s: %s\n' "${sd_h%%:*}" "$(printf '%s' "${sd_h#*base64:}" | base64 -d 2>/dev/null | tr '\n' ' ')" ;;
+						*) printf '    %s\n' "$sd_h" ;;
+					esac
+				done
+			if grep -qi '<html' "$sd_raw" 2>/dev/null; then
+				echo "    ответ — HTML-страница, не список ключей"
+				sd_list=""
+			elif grep -qE '^[a-z0-9]+://' "$sd_raw" 2>/dev/null; then
+				echo "    формат: ссылки текстом"
+				sd_list=$(tr -d '\r' < "$sd_raw" | grep -E '^[a-z0-9]+://')
+			elif base64 -d "$sd_raw" 2>/dev/null | grep -qE '^[a-z0-9]+://'; then
+				echo "    формат: base64"
+				sd_list=$(base64 -d "$sd_raw" 2>/dev/null | tr -d '\r' | grep -E '^[a-z0-9]+://')
+			else
+				echo "    формат не распознан, начало ответа (без ключей): $(head -c 120 "$sd_raw" 2>/dev/null | tr -d '\r\n' | sed -E 's#://[^@ ]*@#://СКРЫТО@#g')"
+				sd_list=""
+			fi
+			if [ -n "$sd_list" ]; then
+				echo "    серверов: $(printf '%s\n' "$sd_list" | grep -c .) — $(printf '%s\n' "$sd_list" | sed 's#://.*##' | sort | uniq -c | awk '{printf "%s %s; ", $2, $1}')"
+				printf '%s\n' "$sd_list" | while IFS= read -r sd_l; do sub_link_line "$sd_l" "$sd_ex"; done
+			fi
+			rm -f "$sd_raw" "$sd_hdr"
+		done
+		echo
+		echo "  Сейчас в podkop ($(opt "$sd_s" proxy_config_type)): $(uci -q get "podkop.$sd_s.urltest_proxy_links" | tr ' ' '\n' | grep -c .) серверов"
+		uci -q get "podkop.$sd_s.urltest_proxy_links" | tr ' ' '\n' | grep . | while IFS= read -r sd_l; do
+			sd_n=""
+			case "$sd_l" in *\#*) sd_n=$(urldecode "${sd_l#*#}") ;; esac
+			echo "    ${sd_l%%://*} | $(host_of "$sd_l") | $sd_n"
+		done
+		echo "  Серверы группы в sing-box: $(sub_members "$sd_s" | wc -l)"
+	done
+}
+
 t_report() {
 	id=$1
 	f="$RUN_DIR/report.txt"
@@ -2134,8 +2436,11 @@ t_report() {
 		echo "===== Секции podkop (ключи скрыты)"
 		uci -q show podkop | sed -E "s#(hysteria2|hy2|vless|vmess|ss|trojan|tuic|socks[45]?|anytls)://[^' ]*#\1://СКРЫТО#g; s#(\"(server|password|username|uuid|server_port)\" *: *)(\"[^\"]*\"|[0-9]+)#\1\"СКРЫТО\"#g"
 		echo
+		echo "===== Подписки (без ключей)"
+		[ -d "$SUB_DIR" ] && sub_diag || echo "подписок нет"
+		echo
 		echo "===== Журнал podkop / sing-box / агента"
-		logread 2>/dev/null | grep -iE "podkop|sing-box|$NAME" | tail -n 150
+		logread 2>/dev/null | grep -iE "podkop|sing-box|$NAME" | tail -n 200
 	} > "$f" 2>&1
 	if server_curl -s -m 60 -X POST -H "X-Token: $TOKEN" --data-binary "@$f" "$SERVER/api.php?a=upload&task=$id" | grep -q '"ok":true'; then
 		add_result "$id" true "отчёт отправлен"
@@ -2194,12 +2499,17 @@ t_refresh_subscription() {
 	SUB_CHANGED=0
 	if sub_refresh "$s"; then
 		set -- $(cat "$SUB_DIR/$s.stat")
+		rs_note=""
+		[ "${SUB_ADDED:-0}" -gt 0 ] && rs_note="новых серверов: $SUB_ADDED"
+		[ "${SUB_GONE:-0}" -gt 0 ] && rs_note="$rs_note${rs_note:+, }пропало: $SUB_GONE"
+		rs_skip=$(grep -c . "$SUB_DIR/$s.skipped" 2>/dev/null)
+		[ "${rs_skip:-0}" -gt 0 ] && rs_note="$rs_note${rs_note:+; }не подошли $rs_skip (причины — в списке серверов на сайте)"
 		if [ "$SUB_CHANGED" = 1 ]; then
 			uci commit podkop
 			podkop_apply
-			add_result "$id" true "список серверов обновлён: подходят $2 из $1"
+			add_result "$id" true "список серверов обновлён: работают $2 из $1${rs_note:+; $rs_note}"
 		else
-			add_result "$id" true "список серверов не изменился: подходят $2 из $1"
+			add_result "$id" true "подписка скачана заново, состав серверов тот же: работают $2 из $1${rs_note:+; $rs_note}"
 		fi
 	else
 		add_result "$id" false "$SUB_ERR"
@@ -2256,51 +2566,178 @@ t_sub_switch() {
 	add_result "$id" true "$s: работает через «$(sub_name_of "$s" "$target")», $DELAY мс"
 }
 
-# Обновление podkop официальным установщиком (адрес зашит в агенте, сервер его не выбирает).
-# На любые вопросы установщика отвечаем «нет»: так он никогда не сбросит настройки podkop
-# (это он предлагает для версий < 0.7) и не удалит конфликтующие пакеты — просто остановится.
+# Обновление podkop официальным установщиком или скриптом зеркала podkop (адреса зашиты в агенте,
+# сервер их не выбирает). На любые вопросы отвечаем «нет»: так установщик никогда не сбросит настройки
+# podkop (это он предлагает для версий < 0.7) и не удалит конфликтующие пакеты — просто остановится.
+# engine=1 — перейти на движок podkop-engine (новые REALITY-серверы и xhttp).
 t_update_podkop() {
 	id=$1
+	want_engine=$(task_field engine)
 	if [ ! -x /etc/init.d/podkop ]; then
 		add_result "$id" false "podkop не установлен"
 		return
 	fi
 	old=$(podkop show_version 2>/dev/null | head -n 1)
+	old_sb=$(sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
 	case "$old" in
 		''|v0.[0-6].*|0.[0-6].*)
 			add_result "$id" false "podkop ${old:-неизвестной версии} слишком старый: обновление сбросит его настройки — обновите вручную по SSH (команда установки с --update-podkop)"
 			return
 			;;
 	esac
+	if [ "$want_engine" = 1 ] && sb_engine; then
+		want_engine=0
+	fi
 	f="$RUN_DIR/podkop-install.sh"
 	ulog="$RUN_DIR/podkop-update.log"
 	mkdir -p "$RUN_DIR"
-	if ! curl -sfL -m 90 -o "$f" "$PODKOP_INSTALLER"; then
-		add_result "$id" false "не удалось скачать установщик podkop с GitHub"
+	via=""
+	# Официальный установщик с GitHub; движок podkop-engine и недоступный GitHub — через зеркало разработчиков podkop
+	# Где уже стоит podkop-engine, официальный установщик мог бы вернуть обычный sing-box — только зеркало
+	if [ "$want_engine" != 1 ] && ! sb_engine && curl -sfL -m 90 -o "$f" "$PODKOP_INSTALLER" && head -n 1 "$f" | grep -q '^#!/bin/sh' && sh -n "$f"; then
+		via=github
+	elif curl -sfL -m 120 -o "$f" "$PODKOP_MIRROR" && head -n 1 "$f" | grep -q '^#!/bin/sh' && sh -n "$f"; then
+		via=mirror
+	else
+		rm -f "$f"
+		add_result "$id" false "не удалось скачать установщик podkop ни с GitHub, ни с зеркала podkop"
 		return
 	fi
-	if ! head -n 1 "$f" | grep -q '^#!/bin/sh' || ! sh -n "$f"; then
-		add_result "$id" false "установщик podkop скачался повреждённым"
-		return
+	log "обновляю podkop ($old, sing-box $old_sb) через $via$([ "$want_engine" = 1 ] && echo ', переход на podkop-engine')"
+	: > "$ulog"
+	if [ "$via" = github ]; then
+		printf 'n\nn\nn\nn\nn\n' | sh "$f" >> "$ulog" 2>&1
+		rc=$?
+		# Официальный установщик не справился (часто пакеты с GitHub не скачиваются) — зеркало podkop
+		if [ "$rc" != 0 ] && curl -sfL -m 120 -o "$f" "$PODKOP_MIRROR" && head -n 1 "$f" | grep -q '^#!/bin/sh' && sh -n "$f"; then
+			log "официальный установщик podkop завершился с ошибкой — пробую зеркало podkop"
+			via=mirror
+			sh "$f" < /dev/null >> "$ulog" 2>&1
+			rc=$?
+		fi
+	else
+		# Без терминала скрипт зеркала на все вопросы отвечает «нет» и ничего не удаляет сам.
+		# Чтобы он поставил podkop-engine вместо обычного sing-box, обычный убираем заранее (только opkg).
+		if [ "$want_engine" = 1 ]; then
+			if ! command -v opkg >/dev/null 2>&1; then
+				rm -f "$f"
+				add_result "$id" false "переход на podkop-engine из панели пока только для OpenWrt с opkg (23.05/24.10) — запустите на роутере по SSH: wget -O - $PODKOP_MIRROR | sh"
+				return
+			fi
+			/etc/init.d/podkop stop >/dev/null 2>&1
+			opkg remove sing-box --force-depends >> "$ulog" 2>&1
+		fi
+		sh "$f" < /dev/null >> "$ulog" 2>&1
+		rc=$?
+		# Движок не встал — вернуть обычный sing-box, чтобы podkop не остался без него
+		if ! command -v sing-box >/dev/null 2>&1; then
+			log "sing-box после установки не найден — возвращаю пакет sing-box"
+			opkg update >/dev/null 2>&1
+			opkg install sing-box >> "$ulog" 2>&1
+			rc=1
+		fi
 	fi
-	log "обновляю podkop ($old)"
-	printf 'n\nn\nn\nn\nn\n' | sh "$f" > "$ulog" 2>&1
-	rc=$?
 	rm -f "$f"
 	# Совет разработчика podkop: после обновления очистить кэш LuCI
 	rm -rf /tmp/luci-*
 	new=$(podkop show_version 2>/dev/null | head -n 1)
-	if [ "$rc" != 0 ]; then
-		add_result "$id" false "установщик podkop остановился: $(grep -v '^[[:space:]]*$' "$ulog" | tail -n 2 | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' ')"
-		return
-	fi
+	new_sb=$(sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
 	/etc/init.d/podkop restart >/dev/null 2>&1
 	PODKOP_CHANGED=1
-	if [ "$new" = "$old" ]; then
-		add_result "$id" true "podkop уже последней версии ($new); кэш LuCI очищен"
-	else
-		add_result "$id" true "podkop обновлён: $old → $new; кэш LuCI очищен"
+	eng_note=""
+	sb_engine && eng_note=" (движок podkop-engine)"
+	if [ "$rc" != 0 ] && [ "$new" = "$old" ] && [ "$new_sb" = "$old_sb" ]; then
+		add_result "$id" false "установщик podkop ($via) остановился: $(grep -v '^[[:space:]]*$' "$ulog" | tail -n 2 | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' ' | cut -c1-300)"
+		return
 	fi
+	if [ "$new" = "$old" ] && [ "$new_sb" = "$old_sb" ]; then
+		add_result "$id" true "podkop уже последней версии ($new), sing-box $new_sb$eng_note; кэш LuCI очищен"
+	else
+		add_result "$id" true "podkop $old → $new, sing-box $old_sb → $new_sb$eng_note (через $([ "$via" = github ] && echo GitHub || echo зеркало podkop)); кэш LuCI очищен"
+	fi
+}
+
+# Перезагрузка по кнопке на сайте: сначала отправляем ответ, потом перезагружаемся (в run).
+# Если ответ не дошёл и сервер прислал задачу снова — второй раз не перезагружаемся.
+t_reboot() {
+	id=$1
+	if [ "$(cat "$CONF_DIR/reboot_id" 2>/dev/null)" = "$id" ]; then
+		add_result "$id" true "роутер перезагружен"
+		return
+	fi
+	echo "$id" > "$CONF_DIR/reboot_id"
+	add_result "$id" true "перезагружаюсь — роутер вернётся на связь через 1–3 минуты"
+	REBOOT_NOW=1
+}
+
+# Ключи по запросу владельца: ссылка подписки, все ключи из неё, одиночные ключи и настройки outbound.
+# Уходят только в ответ на эту задачу; сайт показывает их владельцу и сразу забывает.
+add_result_secret() { # id ok сообщение json
+	mkdir -p "$CONF_DIR"
+	printf '{"id":%s,"ok":%s,"msg":%s,"secret":%s}\n' "$(json_num "$1")" "$2" "$(json_str "$3")" "$4" >> "$RESULTS"
+	log "задача #$1: $2 — $3"
+	TASKS_DONE=1
+}
+
+keys_links_json() { # файл со ссылками → [{"name":…,"link":…}]
+	kl_out=""
+	while IFS= read -r kl_l; do
+		case "$kl_l" in
+			[a-z0-9]*://*) ;;
+			*) continue ;;
+		esac
+		kl_n=""
+		case "$kl_l" in *\#*) kl_n=$(urldecode "${kl_l#*#}") ;; esac
+		kl_why=$(link_unsupported "$kl_l")
+		kl_out="$kl_out${kl_out:+,}$(printf '{"name":%s,"link":%s,"why":%s}' "$(json_str "$kl_n")" "$(json_str "$kl_l")" "$(json_str "$kl_why")")"
+	done < "$1"
+	printf '[%s]' "$kl_out"
+}
+
+t_show_keys() {
+	id=$1
+	sk_only=$(task_field section)
+	sb_engine && SB_XHTTP=1 || SB_XHTTP=0
+	sk_out=""
+	sk_n=0
+	for sk_s in $(podkop_sections); do
+		[ -n "$sk_only" ] && [ "$sk_s" != "$sk_only" ] && continue
+		[ "$(opt "$sk_s" connection_type)" = proxy ] || continue
+		sk_pc=$(opt "$sk_s" proxy_config_type)
+		sk_key=""
+		sk_ob=""
+		sk_url=""
+		sk_src=""
+		: > "$RUN_DIR/keys.list"
+		case "$sk_pc" in
+			url) sk_key=$(opt "$sk_s" proxy_string) ;;
+			outbound) sk_ob=$(opt "$sk_s" outbound_json) ;;
+		esac
+		if [ -s "$SUB_DIR/$sk_s.url" ]; then
+			sk_url=$(cat "$SUB_DIR/$sk_s.url")
+			# Все ключи подписки, как их видит приложение; не скачалась — те, что сейчас в работе
+			if sub_fetch "$sk_url" "$RUN_DIR/keys.all"; then
+				grep -E '^[a-z0-9]+://' "$RUN_DIR/keys.all" > "$RUN_DIR/keys.list"
+				sk_src=fresh
+			else
+				cp "$SUB_DIR/$sk_s.links" "$RUN_DIR/keys.list" 2>/dev/null
+				sk_src=saved
+			fi
+			rm -f "$RUN_DIR/keys.all"
+		elif [ "$sk_pc" = urltest ] || [ "$sk_pc" = selector ]; then
+			uci -q get "podkop.$sk_s.${sk_pc}_proxy_links" | tr ' ' '\n' > "$RUN_DIR/keys.list"
+		fi
+		sk_out="$sk_out${sk_out:+,}$(printf '{"name":%s,"key":%s,"outbound":%s,"sub_url":%s,"src":%s,"links":%s}' \
+			"$(json_str "$sk_s")" "$(json_str "$sk_key")" "$(json_str "$sk_ob")" "$(json_str "$sk_url")" "$(json_str "$sk_src")" \
+			"$(keys_links_json "$RUN_DIR/keys.list")")"
+		sk_n=$((sk_n + 1))
+	done
+	rm -f "$RUN_DIR/keys.list"
+	if [ "$sk_n" = 0 ]; then
+		add_result "$id" false "${sk_only:+в секции $sk_only }нет ключей прокси"
+		return
+	fi
+	add_result_secret "$id" true "ключи переданы на сайт (секций: $sk_n)" "{\"sections\":[$sk_out]}"
 }
 
 # ---------- Сервис включён / выключен ----------
@@ -2407,6 +2844,13 @@ run() {
 		sync_once || svc_offline_check
 		# Результаты задач отправляем сразу, не дожидаясь следующего цикла
 		[ "$TASKS_DONE" = 1 ] && sync_once
+		if [ "$REBOOT_NOW" = 1 ]; then
+			log "перезагрузка по команде из панели"
+			[ -d /etc/inet-watchdog ] && echo "$(date '+%Y-%m-%d %H:%M:%S') [uptime $(cut -d. -f1 /proc/uptime)s] ПЕРЕЗАГРУЗКА: по команде из панели" >> /etc/inet-watchdog/history.log
+			sync
+			reboot
+			sleep 120
+		fi
 		[ "$RESTART_FOR_UPDATE" = 1 ] && exit 0
 		if [ "$STATUS" = "active" ] && sync_lock; then
 			# Секцию для скачивания списков могли удалить в LuCI
@@ -2529,6 +2973,7 @@ case "$1" in
 		load_conf
 		sync_once && echo "OK: статус на сервере — $STATUS"
 		[ "$TASKS_DONE" = 1 ] && sync_once
+		[ "$REBOOT_NOW" = 1 ] && { echo "перезагрузка по команде из панели"; sync; reboot; }
 		true
 		;;
 	status)        do_status ;;

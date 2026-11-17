@@ -34,7 +34,7 @@
 # Отчёт:       inet-watchdog report > /tmp/report.txt
 # Настройки:   /etc/inet-watchdog.conf  (после правки: inet-watchdog restart)
 
-VERSION="3.6"
+VERSION="3.7"
 NAME="inet-watchdog"
 BIN="/usr/bin/$NAME"
 INIT="/etc/init.d/$NAME"
@@ -152,6 +152,8 @@ has_podkop() {
 podkop_state() {
 	if ! has_podkop; then
 		echo off
+	elif [ -f "/tmp/$NAME.podkop_safe" ]; then
+		echo safe
 	elif pidof sing-box >/dev/null; then
 		echo running
 	else
@@ -236,6 +238,20 @@ restart_dns() {
 		u=$(podkop_unconfigured)
 		if [ -n "$u" ]; then
 			stop_unconfigured_podkop "$u"
+		elif podkop_safe; then
+			# podkop уже остановлен, а DNS всё равно не работает — дело не в нём
+			/etc/init.d/podkop stop >/dev/null 2>&1
+			/etc/init.d/dnsmasq restart
+		elif ! pidof sing-box >/dev/null; then
+			# sing-box не запущен: один перезапуск podkop; не помог — аварийный режим
+			sb_restarts_failed=$((sb_restarts_failed + 1))
+			safe_after=2
+			[ -f "$SAFE_MARK" ] && safe_after=1
+			if [ "$sb_restarts_failed" -ge "$safe_after" ]; then
+				podkop_safe_on
+			else
+				restart_podkop
+			fi
 		else
 			restart_podkop
 		fi
@@ -326,6 +342,65 @@ podkop_problem() {
 
 dnsmasq_pids() {
 	pidof dnsmasq | tr ' ' '\n' | sort -n | tr '\n' ' '
+}
+
+# ---------- Аварийный режим podkop ----------
+# sing-box не запускается (сломанный ключ, списки не скачиваются, несовместимый сервер) — а DNS роутера
+# направлен в него, и без DNS не работает вообще ничего. Перезагрузки тут не помогают. Поэтому после
+# неудачного перезапуска podkop останавливаем: DNS возвращается к обычному, интернет идёт напрямую
+# (домены «Никогда напрямую» не открываются — так и задумано). Раз в 15 минут пробуем запустить снова.
+SAFE_FLAG="/tmp/$NAME.podkop_safe"
+SAFE_MARK="$STATE_DIR/podkop_safe" # был аварийный режим до перезагрузки — после неё переходим в него быстрее
+SAFE_RETRY=900
+sb_restarts_failed=0
+
+# Последняя причина падения sing-box из журнала
+sb_fatal() {
+	logread 2>/dev/null | grep 'sing-box' | grep -F 'FATAL' | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g; s/.*FATAL[^ ]* *//' | cut -c1-200
+}
+
+podkop_safe_on() {
+	/etc/init.d/podkop stop >/dev/null 2>&1
+	date +%s > "$SAFE_FLAG"
+	[ -f "$SAFE_MARK" ] || { mkdir -p "$STATE_DIR"; touch "$SAFE_MARK"; }
+	f=$(sb_fatal)
+	log_history "АВАРИЙНЫЙ РЕЖИМ: sing-box не запускается${f:+ ($f)} — останавливаю podkop, интернет пойдёт напрямую; попробую снова через $((SAFE_RETRY / 60)) мин"
+	sb_restarts_failed=0
+}
+
+podkop_safe_off() { # причина
+	rm -f "$SAFE_FLAG" "$SAFE_MARK"
+	log_history "аварийный режим снят: $1"
+}
+
+# Попробовать запустить podkop из аварийного режима. 0 — заработал.
+podkop_safe_try() {
+	log_history "аварийный режим: пробую запустить podkop"
+	with_timeout 120 /etc/init.d/podkop start >/dev/null 2>&1
+	ok=0
+	down=0
+	for i in 1 2 3 4 5 6 7 8 9; do
+		sleep 10
+		if pidof sing-box >/dev/null; then
+			ok=$((ok + 1))
+			down=0
+			[ "$ok" -ge 2 ] && [ -z "$(podkop_problem)" ] && return 0
+		else
+			ok=0
+			down=$((down + 1))
+			# 30 секунд sing-box так и не поднялся — не держим DNS сломанным зря
+			[ "$down" -ge 3 ] && break
+		fi
+	done
+	f=$(sb_fatal)
+	/etc/init.d/podkop stop >/dev/null 2>&1
+	date +%s > "$SAFE_FLAG"
+	log_history "аварийный режим: podkop снова не запустился${f:+ ($f)} — остаюсь без него"
+	return 1
+}
+
+podkop_safe() {
+	[ -f "$SAFE_FLAG" ]
 }
 
 # Переподключение устройств: LAN-порты и Wi-Fi гаснут на несколько секунд.
@@ -475,7 +550,18 @@ run() {
 				last_fix=0
 			fi
 			set_reboots 0
+			sb_restarts_failed=0
 			write_state ok "" 0
+			# Аварийный режим: podkop запустили (агент после новых настроек) — снять; иначе раз в 15 минут пробовать
+			if podkop_safe && has_podkop; then
+				if pidof sing-box >/dev/null && [ -z "$(podkop_problem)" ]; then
+					podkop_safe_off "podkop снова работает"
+				elif [ $(($(date +%s) - $(cat "$SAFE_FLAG" 2>/dev/null || echo 0))) -ge "$SAFE_RETRY" ]; then
+					podkop_safe_try && podkop_safe_off "podkop запустился и работает"
+				fi
+			elif podkop_safe; then
+				podkop_safe_off "podkop выключен или удалён"
+			fi
 		else
 			if [ "$problem_since" -eq 0 ]; then
 				problem_since=$now
@@ -529,7 +615,7 @@ run() {
 		fi
 
 		# --- podkop ---
-		if [ "$PODKOP_CHECK" = "1" ] && has_podkop; then
+		if [ "$PODKOP_CHECK" = "1" ] && has_podkop && ! podkop_safe; then
 			now=$(uptime_s)
 
 			# Полный перезапуск podkop (сохранение в LuCI, restart) перезапускает dnsmasq.
@@ -854,6 +940,7 @@ function renderStatus(running, st) {
 	var podkop = {
 		running: badge('работает', 'ok'),
 		stopped: badge('sing-box НЕ ЗАПУЩЕН', 'bad'),
+		safe: badge('АВАРИЙНЫЙ РЕЖИМ: остановлен, интернет напрямую', 'warn'),
 		off: badge('не установлен или выключен', 'muted')
 	}[st.podkop] || '—';
 
@@ -1114,6 +1201,7 @@ do_test() {
 	case "$(podkop_state)" in
 		running) echo "      podkop: включён, sing-box работает" ;;
 		stopped) echo "      podkop: включён, sing-box НЕ ЗАПУЩЕН" ;;
+		safe)    echo "      podkop: АВАРИЙНЫЙ РЕЖИМ — остановлен сторожем, интернет идёт напрямую" ;;
 		off)     echo "      podkop: не найден или выключен" ;;
 	esac
 }
