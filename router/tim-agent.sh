@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.13"
+VERSION="2.14"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -1125,6 +1125,8 @@ agent_wait() { # секунд
 		if [ "$STATUS" = "active" ] && [ "$(date +%s)" -lt "$aw_end" ]; then
 			sb_health
 			quick_check
+			# Автовыбор сменил сервер — выход перемерить сразу, а не через пару минут
+			pidof sing-box >/dev/null && ip_tick
 		fi
 	done
 }
@@ -1185,6 +1187,20 @@ ip_outbounds() { # тег
 	return 1
 }
 
+# Вся цепочка, через которую сейчас выходит секция: её сервер и текущие серверы секций, через которые она идёт.
+# Меняется любой из них (автовыбор нашёл сервер быстрее) — выход перемеряем.
+ip_chain_key() { # тег конечного сервера
+	ick_k=$1
+	ick_t=$1
+	for ick_i in 1 2 3 4; do
+		ick_d=$(jsonfilter -i "$IP_CFG" -e "@.outbounds[@.tag=\"$ick_t\"].detour" 2>/dev/null)
+		[ -n "$ick_d" ] || break
+		ick_t=$(ip_leaf "$ick_d") || break
+		ick_k="$ick_k>$ick_t"
+	done
+	echo "$ick_k"
+}
+
 ip_probe_section() { # секция → JSON в $IP_DIR/<секция>.json
 	ips_f="$IP_DIR/$1"
 	if [ "$(opt "$1" connection_type)" = "vpn" ]; then
@@ -1192,8 +1208,12 @@ ip_probe_section() { # секция → JSON в $IP_DIR/<секция>.json
 	else
 		ips_leaf=$(ip_leaf "$1-out") || return 1
 	fi
+	IP_CFG=$(uci -q get podkop.settings.config_path)
+	[ -n "$IP_CFG" ] || IP_CFG=/etc/sing-box/config.json
+	ips_key=$ips_leaf
+	[ "${ips_leaf%%:*}" = "vpn" ] || ips_key=$(ip_chain_key "$ips_leaf")
 	# Свежий результат для того же сервера — не повторяем
-	if [ "$(cat "$ips_f.leaf" 2>/dev/null)" = "$ips_leaf" ] && [ -f "$ips_f.json" ] && \
+	if [ "$(cat "$ips_f.leaf" 2>/dev/null)" = "$ips_key" ] && [ -f "$ips_f.json" ] && \
 		[ $(( $(date +%s) - $(date -r "$ips_f.json" +%s 2>/dev/null || echo 0) )) -lt "$IP_EVERY" ]; then
 		return 0
 	fi
@@ -1203,16 +1223,22 @@ ip_probe_section() { # секция → JSON в $IP_DIR/<секция>.json
 	else
 		# Хватит ли памяти на второй, маленький sing-box
 		[ "$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)" -ge 30 ] || return 1
-		IP_CFG=$(uci -q get podkop.settings.config_path)
-		[ -n "$IP_CFG" ] || IP_CFG=/etc/sing-box/config.json
 		ips_o=$(ip_outbounds "$ips_leaf") || return 1
 		printf '{"log":{"level":"panic"},"outbounds":[%s]}' "$ips_o" > "$IP_DIR/mini.json"
-		ips_r=$(sing-box tools fetch -c "$IP_DIR/mini.json" -o "$ips_leaf" "$IP_URL" 2>/dev/null)
+		# Не дольше 15 секунд: замер идёт в быстром цикле, мёртвый сервер не должен его держать
+		sing-box tools fetch -c "$IP_DIR/mini.json" -o "$ips_leaf" "$IP_URL" > "$IP_DIR/fetch.out" 2>/dev/null &
+		ips_p=$!
+		( sleep 15; kill "$ips_p" 2>/dev/null ) &
+		ips_k=$!
+		wait "$ips_p" 2>/dev/null
+		kill "$ips_k" 2>/dev/null
+		ips_r=$(cat "$IP_DIR/fetch.out" 2>/dev/null)
+		rm -f "$IP_DIR/fetch.out"
 		rm -f "$IP_DIR/mini.json"
 	fi
 	ips_j=$(ip_norm "$ips_r") || ips_j=$(printf '{"error":"не удалось определить — сервер не отвечает","ts":%s}' "$(date +%s)")
 	echo "$ips_j" > "$ips_f.json"
-	echo "$ips_leaf" > "$ips_f.leaf"
+	echo "$ips_key" > "$ips_f.leaf"
 }
 
 ip_tick() {
@@ -1353,25 +1379,39 @@ sub_json() { # секция
 	if [ -z "$js_sel" ] || [ "$js_sel" = "$js_tag" ]; then
 		js_sel=$(jsonfilter -i "$js_pf" -e "@.proxies[\"$js_tag\"].now" 2>/dev/null)
 	fi
+	# Серверы группы podkop называет <секция>-<номер>-out по порядку ссылок. Сопоставляем по адресу И названию:
+	# у провайдера под одним адресом бывает несколько серверов, и по одному адресу «сейчас» досталось бы всем
+	js_tm="$RUN_DIR/sub_$1.tags"
+	js_i=0
+	uci -q get "podkop.$1.urltest_proxy_links" | tr ' ' '\n' | grep . | while IFS= read -r js_l; do
+		js_i=$((js_i + 1))
+		printf '%s|%s|%s\n' "$1-$js_i-out" "$(host_of "$js_l")" "$(urldecode "${js_l#*#}" | tr -d '|')"
+	done > "$js_tm"
 	js_servers=""
 	js_nowhost=""
+	js_nowdone=""
 	while IFS='|' read -r js_host js_type js_name; do
-		js_m=$(awk -F'|' -v h="$js_host" '$2 == h { print $1; exit }' "$js_mf")
+		js_m=$(awk -F'|' -v h="$js_host" -v n="$js_name" '$2 == h && $3 == n { print $1; exit }' "$js_tm")
+		# Такого тега в sing-box нет (другая схема имён) — как раньше, по адресу
+		if [ -z "$js_m" ] || ! grep -q "^$js_m|" "$js_mf"; then
+			js_m=$(awk -F'|' -v h="$js_host" '$2 == h { print $1; exit }' "$js_mf")
+		fi
 		js_d=""
 		js_in=false
 		js_now=false
 		if [ -n "$js_m" ]; then
 			js_in=true
 			js_d=$(jsonfilter -i "$js_pf" -e "@.proxies[\"$js_m\"].history[*].delay" 2>/dev/null | tail -n 1)
-			if [ "$js_m" = "$js_sel" ]; then
+			if [ "$js_m" = "$js_sel" ] && [ -z "$js_nowdone" ]; then
 				js_now=true
 				js_nowhost=$js_host
+				js_nowdone=1
 			fi
 		fi
 		js_servers="$js_servers${js_servers:+,}$(printf '{"host":%s,"type":%s,"name":%s,"delay":%s,"now":%s,"in":%s}' \
 			"$(json_str "$js_host")" "$(json_str "$js_type")" "$(json_str "$js_name")" "$(json_num "$js_d")" "$js_now" "$js_in")"
 	done < "$js_f.names"
-	rm -f "$js_pf" "$js_mf"
+	rm -f "$js_pf" "$js_mf" "$js_tm"
 	js_pin=$(cat "$js_f.pin" 2>/dev/null)
 	js_skip=""
 	[ -s "$js_f.skipped" ] && while IFS='|' read -r js_host js_type js_name js_why; do
@@ -2616,25 +2656,44 @@ t_update_podkop() {
 			rc=$?
 		fi
 	else
-		# Без терминала скрипт зеркала на все вопросы отвечает «нет» и ничего не удаляет сам.
-		# Чтобы он поставил podkop-engine вместо обычного sing-box, обычный убираем заранее (только opkg).
+		# Без терминала скрипт зеркала на все вопросы отвечает «нет». Для перехода на podkop-engine отвечаем «да»
+		# ровно на один вопрос — «заменить sing-box на podkop-engine?»: строку вопроса находим и меняем, только если
+		# она в скрипте есть и одна. Саму замену скрипт делает своими средствами — одинаково для opkg и apk (OpenWrt 25+).
 		if [ "$want_engine" = 1 ]; then
-			if ! command -v opkg >/dev/null 2>&1; then
+			if [ "$(grep -c 'if ask "$_pq" pdk_replace; then' "$f")" = 1 ]; then
+				sed -i 's/if ask "$_pq" pdk_replace; then/if true; then/' "$f"
+				if ! sh -n "$f"; then
+					rm -f "$f"
+					add_result "$id" false "скрипт зеркала podkop изменился — перейти на podkop-engine автоматически не получилось; на роутере по SSH: wget -O - $PODKOP_MIRROR | sh"
+					return
+				fi
+			elif command -v opkg >/dev/null 2>&1; then
+				# Скрипт зеркала изменился: старый способ — убрать обычный sing-box заранее, тогда скрипт ставит движок сам
+				/etc/init.d/podkop stop >/dev/null 2>&1
+				opkg remove sing-box --force-depends >> "$ulog" 2>&1
+			else
 				rm -f "$f"
-				add_result "$id" false "переход на podkop-engine из панели пока только для OpenWrt с opkg (23.05/24.10) — запустите на роутере по SSH: wget -O - $PODKOP_MIRROR | sh"
+				add_result "$id" false "скрипт зеркала podkop изменился — перейти на podkop-engine автоматически не получилось; на роутере по SSH: wget -O - $PODKOP_MIRROR | sh"
 				return
 			fi
-			/etc/init.d/podkop stop >/dev/null 2>&1
-			opkg remove sing-box --force-depends >> "$ulog" 2>&1
 		fi
 		sh "$f" < /dev/null >> "$ulog" 2>&1
 		rc=$?
 		# Движок не встал — вернуть обычный sing-box, чтобы podkop не остался без него
 		if ! command -v sing-box >/dev/null 2>&1; then
 			log "sing-box после установки не найден — возвращаю пакет sing-box"
-			opkg update >/dev/null 2>&1
-			opkg install sing-box >> "$ulog" 2>&1
+			if command -v apk >/dev/null 2>&1; then
+				apk update >/dev/null 2>&1
+				apk add sing-box >> "$ulog" 2>&1
+			else
+				opkg update >/dev/null 2>&1
+				opkg install sing-box >> "$ulog" 2>&1
+			fi
 			rc=1
+		fi
+		if [ "$want_engine" = 1 ] && ! sb_engine; then
+			rc=1
+			echo "podkop-engine не установился" >> "$ulog"
 		fi
 	fi
 	rm -f "$f"
