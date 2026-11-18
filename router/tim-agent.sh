@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.14"
+VERSION="2.15"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -430,9 +430,12 @@ login_check() {
 		[ -n "$user" ] || user=$(printf '%s' "$line" | sed -nE "s/.* for '?([A-Za-z0-9_.-]+)'? .*/\1/p")
 		ip=$(printf '%s' "$line" | sed -nE 's/.* from ([0-9a-fA-F.:]+[0-9a-fA-F]).*/\1/p' | sed -E 's/:[0-9]+$//')
 		# Имя устройства по DHCP этого роутера (телефон, компьютер) — если адрес выдавал он
+		# На какую страницу LuCI был вход: браузер (/admin/…) или приложение через API (/rpc/…)
+		path=""
+		[ "$via" = luci ] && path=$(printf '%s' "$line" | sed -nE 's#.* login on (/[^ ]*) for .*#\1#p' | tr -cd 'A-Za-z0-9/_.-' | cut -c1-100)
 		host=""
 		[ -n "$ip" ] && host=$(awk -v ip="$ip" '$3 == ip && $4 != "*" { print $4; exit }' /tmp/dhcp.leases 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-63)
-		add_event "$(printf '{"type":"login","via":"%s","ok":%s,"key":%s,"user":%s,"ip":%s,"host":%s}' "$via" "$ok" "$key" "$(json_str "$user")" "$(json_str "$ip")" "$(json_str "$host")")"
+		add_event "$(printf '{"type":"login","via":"%s","ok":%s,"key":%s,"user":%s,"ip":%s,"host":%s,"path":%s}' "$via" "$ok" "$key" "$(json_str "$user")" "$(json_str "$ip")" "$(json_str "$host")" "$(json_str "$path")")"
 	done
 	cp "$now" "$seen"
 }
@@ -465,7 +468,7 @@ events_json() {
 #   .fb             сейчас работаем на чужих странах (режим any, свои не отвечают)
 #   .pin            закреплённый сервер: host:port|название
 #   .pick           сервер, выбранный вручную «прямо сейчас» (не навсегда)
-#   .policy         обновление списка: 6h, 24h, dead (только при потере связи), off (только вручную)
+#   .policy         обновление списка: 1h, 2h, 3h, 6h, 24h, dead (только при потере связи), off (только вручную)
 #   .sticky         не менять живой сервер на более быстрый (уходить с него только при отказе)
 
 SUB_DIR="$CONF_DIR/subs"
@@ -494,6 +497,7 @@ urldecode() {
 # Скачать список ключей по ссылке → строки «схема://…» в $2. Сначала как обычный клиент,
 # затем как приложение (многие провайдеры отдают ключи только приложениям).
 sub_fetch() {
+	SUB_STUB=""
 	url=$1
 	out=$2
 	raw="$RUN_DIR/sub.raw"
@@ -518,8 +522,12 @@ sub_fetch() {
 		# Одни заглушки (0.0.0.0, порт 1) — значит, этому клиенту ключи не отдали
 		if grep -E '^[a-z0-9]+://' "$out" | grep -vqE '@(0\.0\.0\.0|127\.0\.0\.1):'; then
 			rm -f "$raw"
+			SUB_STUB=""
 			return 0
 		fi
+		# В названиях заглушек провайдер пишет причину — покажем её на сайте
+		SUB_STUB=$(grep -E '^[a-z0-9]+://.*#' "$out" | sed 's/.*#//' | while IFS= read -r sf_n; do urldecode "$sf_n"; echo; done | \
+			grep . | tr -d '\000-\011\013-\037"\\' | head -n 4 | awk 'NR > 1 { printf " · " } { printf "%s", $0 }' | cut -c1-300)
 	done
 	rm -f "$raw"
 	return 1
@@ -783,7 +791,11 @@ sub_refresh() { # секция
 	mkdir -p "$RUN_DIR"
 	date +%s > "$RUN_DIR/sub_$s.ts"
 	if ! sub_fetch "$(cat "$f.url")" "$RUN_DIR/sub_$s.all"; then
-		SUB_ERR="подписка не отдала ключи — закончилась оплата, занят лимит устройств или ссылка неверна"
+		if [ -n "$SUB_STUB" ]; then
+			SUB_ERR="провайдер не отдал серверы, его ответ: «$SUB_STUB»"
+		else
+			SUB_ERR="подписка не отдала ключи — закончилась оплата, занят лимит устройств или ссылка неверна"
+		fi
 		echo "$SUB_ERR" > "$f.err"
 		return 1
 	fi
@@ -910,6 +922,9 @@ sub_note_event() { # секция текст
 # Как часто обновлять список по времени (0 — по времени не обновлять)
 sub_every() { # секция
 	case "$(cat "$SUB_DIR/$1.policy" 2>/dev/null)" in
+		1h) echo 3600 ;;
+		2h) echo 7200 ;;
+		3h) echo 10800 ;;
 		24h) echo 86400 ;;
 		dead|off) echo 0 ;;
 		*) echo 21600 ;;
@@ -2221,7 +2236,7 @@ t_apply_config() {
 			sub_opt_set "$sf.fallback" "$v"
 			[ "$v" = "strict" ] && rm -f "$sf.fb"
 			v=$(sec_field sub_policy)
-			case "$v" in 6h|24h|dead|off) ;; *) v=6h ;; esac
+			case "$v" in 1h|2h|3h|6h|24h|dead|off) ;; *) v=6h ;; esac
 			sub_opt_set "$sf.policy" "$v"
 			if [ "$(sec_field sub_sticky)" = "true" ]; then
 				sub_opt_set "$sf.sticky" 1
@@ -2475,6 +2490,9 @@ t_report() {
 		echo
 		echo "===== Секции podkop (ключи скрыты)"
 		uci -q show podkop | sed -E "s#(hysteria2|hy2|vless|vmess|ss|trojan|tuic|socks[45]?|anytls)://[^' ]*#\1://СКРЫТО#g; s#(\"(server|password|username|uuid|server_port)\" *: *)(\"[^\"]*\"|[0-9]+)#\1\"СКРЫТО\"#g"
+		echo
+		echo "===== Входы на роутер (журнал роутера)"
+		logread 2>/dev/null | grep -E 'luci: (accepted|failed) login|auth succeeded for|Bad password attempt|login\[[0-9]+\]: (root login|invalid password)' | tail -n 40
 		echo
 		echo "===== Подписки (без ключей)"
 		[ -d "$SUB_DIR" ] && sub_diag || echo "подписок нет"
