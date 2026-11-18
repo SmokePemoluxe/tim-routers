@@ -15,7 +15,7 @@
 # Состояние:   tim-agent status
 # Разовый выход на связь: tim-agent sync
 
-VERSION="2.15"
+VERSION="2.16"
 NAME="tim-agent"
 REPO_RAW="https://raw.githubusercontent.com/SmokePemoluxe/tim-routers"
 PODKOP_INSTALLER="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
@@ -496,40 +496,124 @@ urldecode() {
 
 # Скачать список ключей по ссылке → строки «схема://…» в $2. Сначала как обычный клиент,
 # затем как приложение (многие провайдеры отдают ключи только приложениям).
-sub_fetch() {
+# Сам роутер ходит в интернет мимо прокси, а адрес подписки провайдер связи может блокировать. Поэтому:
+# 1) напрямую, а если DNS роутера отдал подменный адрес (198.18.x.x) — по адресу из публичного DNS;
+# 2) не удалось подключиться (именно соединение, а не ответ провайдера) — через текущий сервер секции $3
+#    (маленький временный sing-box, как для замера выхода). SUB_VIA — каким путём скачалось.
+SUBPX_PORT=45991
+SUBPX_PID=""
+
+sub_proxy_up() { # секция → 0, если поднят временный прокси через её текущий сервер
+	pidof sing-box >/dev/null || return 1
+	[ "$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)" -ge 30 ] || return 1
+	clash_api_addr
+	[ -n "$CLASH_ADDR" ] || return 1
+	IP_CFG=$(uci -q get podkop.settings.config_path)
+	[ -n "$IP_CFG" ] || IP_CFG=/etc/sing-box/config.json
+	spu_leaf=$(ip_leaf "$1-out") || return 1
+	spu_o=$(ip_outbounds "$spu_leaf") || return 1
+	mkdir -p "$RUN_DIR"
+	printf '{"log":{"level":"panic"},"inbounds":[{"type":"mixed","tag":"sub-in","listen":"127.0.0.1","listen_port":%s}],"outbounds":[%s],"route":{"final":"%s"}}' \
+		"$SUBPX_PORT" "$spu_o" "$spu_leaf" > "$RUN_DIR/subpx.json"
+	sing-box run -c "$RUN_DIR/subpx.json" >/dev/null 2>&1 &
+	SUBPX_PID=$!
+	for spu_i in 1 2 3 4 5 6; do
+		sleep 1
+		kill -0 "$SUBPX_PID" 2>/dev/null || break
+		netstat -ltn 2>/dev/null | grep -q "127.0.0.1:$SUBPX_PORT " && return 0
+	done
+	# netstat может не быть: процесс жив — пробуем
+	kill -0 "$SUBPX_PID" 2>/dev/null && return 0
+	sub_proxy_down
+	return 1
+}
+
+sub_proxy_down() {
+	[ -n "$SUBPX_PID" ] && kill "$SUBPX_PID" 2>/dev/null
+	SUBPX_PID=""
+	rm -f "$RUN_DIR/subpx.json"
+}
+
+# Адрес хоста подписки в обход подмены DNS роутера: «host:port:ip» для curl --resolve или пусто
+sub_resolve() { # ссылка
+	sr_h=$(printf '%s' "$1" | sed -E 's#^[a-z]+://##; s#[/?\#].*##; s#^.*@##; s#:[0-9]+$##')
+	sr_p=$(printf '%s' "$1" | sed -nE 's#^[a-z]+://[^/?\#]*:([0-9]+)([/?\#].*)?$#\1#p')
+	[ -n "$sr_p" ] || case "$1" in https://*) sr_p=443 ;; *) sr_p=80 ;; esac
+	case "$sr_h" in *[!0-9.]*) ;; *) return ;; esac
+	sr_ip=$(nslookup "$sr_h" 127.0.0.1 2>/dev/null | sed -n '/^Name/,$p' | awk '/^Address/ && $2 !~ /:/ { print $2; exit }')
+	case "$sr_ip" in
+		198.18.*|198.19.*|'') ;;
+		*) return ;;
+	esac
+	for sr_ns in 1.1.1.1 8.8.8.8 77.88.8.8; do
+		sr_ip=$(nslookup "$sr_h" "$sr_ns" 2>/dev/null | sed -n '/^Name/,$p' | awk '/^Address/ && $2 !~ /:/ { print $2; exit }')
+		if [ -n "$sr_ip" ]; then
+			echo "$sr_h:$sr_p:$sr_ip"
+			return
+		fi
+	done
+}
+
+sub_fetch() { # ссылка файл [секция]
 	SUB_STUB=""
+	SUB_VIA=""
 	url=$1
 	out=$2
+	sf_sec=$3
 	raw="$RUN_DIR/sub.raw"
-	for mode in plain app; do
-		if [ "$mode" = plain ]; then
-			curl -sSfL -m 30 -o "$raw" "$url" 2>/dev/null || continue
+	sf_res=$(sub_resolve "$url")
+	sf_conn=0
+	for sf_route in direct proxy; do
+		set --
+		if [ "$sf_route" = direct ]; then
+			[ -n "$sf_res" ] && set -- --resolve "$sf_res"
 		else
-			# Провайдер показывает устройство как «ОС модель»: Android и свой код у каждого роутера,
-			# чтобы роутеры различались в списке устройств подписки
-			curl -sSfL -m 30 -A "$SUB_UA" -H "x-hwid: $(sub_hwid)" -H "x-device-os: Android" -H "x-ver-os: 14" \
-				-H "x-device-model: $(sub_model)" -o "$raw" "$url" 2>/dev/null || continue
+			# Провайдер ответил (заглушки, страница, ошибка) — через прокси он скажет то же самое
+			[ "$sf_conn" = 1 ] && [ -n "$sf_sec" ] || break
+			sub_proxy_up "$sf_sec" || break
+			set -- -x "socks5h://127.0.0.1:$SUBPX_PORT"
 		fi
-		if grep -qi '<html' "$raw"; then
-			continue
-		elif grep -qE '^[a-z0-9]+://' "$raw"; then
-			tr -d '\r' < "$raw" > "$out"
-		elif base64 -d "$raw" 2>/dev/null | tr -d '\r' > "$out" && grep -qE '^[a-z0-9]+://' "$out"; then
-			:
-		else
-			continue
-		fi
-		# Одни заглушки (0.0.0.0, порт 1) — значит, этому клиенту ключи не отдали
-		if grep -E '^[a-z0-9]+://' "$out" | grep -vqE '@(0\.0\.0\.0|127\.0\.0\.1):'; then
-			rm -f "$raw"
-			SUB_STUB=""
-			return 0
-		fi
-		# В названиях заглушек провайдер пишет причину — покажем её на сайте
-		SUB_STUB=$(grep -E '^[a-z0-9]+://.*#' "$out" | sed 's/.*#//' | while IFS= read -r sf_n; do urldecode "$sf_n"; echo; done | \
-			grep . | tr -d '\000-\011\013-\037"\\' | head -n 4 | awk 'NR > 1 { printf " · " } { printf "%s", $0 }' | cut -c1-300)
+		for mode in plain app; do
+			if [ "$mode" = plain ]; then
+				curl -sSfL -m 30 "$@" -o "$raw" "$url" 2>/dev/null
+			else
+				# Провайдер показывает устройство как «ОС модель»: Android и свой код у каждого роутера,
+				# чтобы роутеры различались в списке устройств подписки
+				curl -sSfL -m 30 "$@" -A "$SUB_UA" -H "x-hwid: $(sub_hwid)" -H "x-device-os: Android" -H "x-ver-os: 14" \
+					-H "x-device-model: $(sub_model)" -o "$raw" "$url" 2>/dev/null
+			fi
+			sf_rc=$?
+			if [ "$sf_rc" != 0 ]; then
+				# Не подключились совсем (адрес, соединение, таймаут, TLS) — повод попробовать через прокси
+				case "$sf_rc" in 5|6|7|28|35|52|56) [ "$sf_route" = direct ] && sf_conn=1 ;; esac
+				continue
+			fi
+			[ "$sf_route" = direct ] && sf_conn=0
+			if grep -qi '<html' "$raw"; then
+				continue
+			elif grep -qE '^[a-z0-9]+://' "$raw"; then
+				tr -d '\r' < "$raw" > "$out"
+			elif base64 -d "$raw" 2>/dev/null | tr -d '\r' > "$out" && grep -qE '^[a-z0-9]+://' "$out"; then
+				:
+			else
+				continue
+			fi
+			# Одни заглушки (0.0.0.0, порт 1) — значит, этому клиенту ключи не отдали
+			if grep -E '^[a-z0-9]+://' "$out" | grep -vqE '@(0\.0\.0\.0|127\.0\.0\.1):'; then
+				rm -f "$raw"
+				SUB_STUB=""
+				SUB_VIA=$sf_route
+				[ "$sf_route" = proxy ] && sub_proxy_down
+				return 0
+			fi
+			# В названиях заглушек провайдер пишет причину — покажем её на сайте
+			SUB_STUB=$(grep -E '^[a-z0-9]+://.*#' "$out" | sed 's/.*#//' | while IFS= read -r sf_n; do urldecode "$sf_n"; echo; done | \
+				grep . | tr -d '\000-\011\013-\037"\\' | head -n 4 | awk 'NR > 1 { printf " · " } { printf "%s", $0 }' | cut -c1-300)
+		done
+		[ "$sf_route" = proxy ] && sub_proxy_down
 	done
 	rm -f "$raw"
+	[ "$sf_conn" = 1 ] && [ -z "$SUB_STUB" ] && SUB_VIA=unreachable
 	return 1
 }
 
@@ -790,9 +874,11 @@ sub_refresh() { # секция
 	[ -s "$f.url" ] || { SUB_ERR="подписка не задана"; return 1; }
 	mkdir -p "$RUN_DIR"
 	date +%s > "$RUN_DIR/sub_$s.ts"
-	if ! sub_fetch "$(cat "$f.url")" "$RUN_DIR/sub_$s.all"; then
+	if ! sub_fetch "$(cat "$f.url")" "$RUN_DIR/sub_$s.all" "$s"; then
 		if [ -n "$SUB_STUB" ]; then
 			SUB_ERR="провайдер не отдал серверы, его ответ: «$SUB_STUB»"
+		elif [ "$SUB_VIA" = unreachable ]; then
+			SUB_ERR="не удаётся подключиться к адресу подписки ни напрямую (похоже, его блокирует провайдер интернета), ни через рабочий сервер секции — работают серверы, скачанные раньше"
 		else
 			SUB_ERR="подписка не отдала ключи — закончилась оплата, занят лимит устройств или ссылка неверна"
 		fi
@@ -2437,7 +2523,7 @@ sub_diag() {
 					-H "x-device-model: $(sub_model)" -o "$sd_raw" -w '%{http_code}' "$sd_url" 2>&1)
 			fi
 			echo
-			echo "  [$([ "$sd_mode" = plain ] && echo 'как обычный клиент' || echo "как приложение: $SUB_UA, Android $(sub_model)")] HTTP $sd_code, $(wc -c < "$sd_raw" 2>/dev/null || echo 0) байт"
+			echo "  [$([ "$sd_mode" = plain ] && echo 'как обычный клиент' || echo "как приложение: $SUB_UA, Android $(sub_model)")] HTTP $sd_code, $( { wc -c < "$sd_raw"; } 2>/dev/null || echo 0) байт"
 			grep -iE '^(content-type|subscription-userinfo|profile-update-interval|profile-title|announce|support-url):' "$sd_hdr" 2>/dev/null | tr -d '\r' | \
 				while IFS= read -r sd_h; do
 					case "$sd_h" in
@@ -2464,6 +2550,15 @@ sub_diag() {
 			fi
 			rm -f "$sd_raw" "$sd_hdr"
 		done
+		echo
+		if sub_proxy_up "$sd_s"; then
+			sd_code=$(curl -sSL -m 30 -x "socks5h://127.0.0.1:$SUBPX_PORT" -A "$SUB_UA" -H "x-hwid: $(sub_hwid)" -H "x-device-os: Android" -H "x-ver-os: 14" -H "x-device-model: $(sub_model)" -o "$RUN_DIR/diag.raw" -w "%{http_code}" "$sd_url" 2>&1)
+			echo "  [через текущий сервер секции, как приложение] HTTP $sd_code, $( { wc -c < "$RUN_DIR/diag.raw"; } 2>/dev/null || echo 0) байт"
+			sub_proxy_down
+			rm -f "$RUN_DIR/diag.raw"
+		else
+			echo "  [через текущий сервер секции] не проверено: sing-box не запущен или мало памяти"
+		fi
 		echo
 		echo "  Сейчас в podkop ($(opt "$sd_s" proxy_config_type)): $(uci -q get "podkop.$sd_s.urltest_proxy_links" | tr ' ' '\n' | grep -c .) серверов"
 		uci -q get "podkop.$sd_s.urltest_proxy_links" | tr ' ' '\n' | grep . | while IFS= read -r sd_l; do
@@ -2560,6 +2655,7 @@ t_refresh_subscription() {
 		rs_note=""
 		[ "${SUB_ADDED:-0}" -gt 0 ] && rs_note="новых серверов: $SUB_ADDED"
 		[ "${SUB_GONE:-0}" -gt 0 ] && rs_note="$rs_note${rs_note:+, }пропало: $SUB_GONE"
+		[ "$SUB_VIA" = proxy ] && rs_note="$rs_note${rs_note:+; }скачано через сервер секции: напрямую адрес подписки недоступен (похоже, блокирует провайдер интернета)"
 		rs_skip=$(grep -c . "$SUB_DIR/$s.skipped" 2>/dev/null)
 		[ "${rs_skip:-0}" -gt 0 ] && rs_note="$rs_note${rs_note:+; }не подошли $rs_skip (причины — в списке серверов на сайте)"
 		if [ "$SUB_CHANGED" = 1 ]; then
@@ -2793,7 +2889,7 @@ t_show_keys() {
 		if [ -s "$SUB_DIR/$sk_s.url" ]; then
 			sk_url=$(cat "$SUB_DIR/$sk_s.url")
 			# Все ключи подписки, как их видит приложение; не скачалась — те, что сейчас в работе
-			if sub_fetch "$sk_url" "$RUN_DIR/keys.all"; then
+			if sub_fetch "$sk_url" "$RUN_DIR/keys.all" "$sk_s"; then
 				grep -E '^[a-z0-9]+://' "$RUN_DIR/keys.all" > "$RUN_DIR/keys.list"
 				sk_src=fresh
 			else
